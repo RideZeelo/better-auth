@@ -1,0 +1,43 @@
+name: Build and Release Packages
+
+on:
+  push:
+    branches: [feat/sso-getMemberData]
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install
+
+      - run: pnpm build
+
+      - name: Pack packages
+        run: |
+          mkdir -p release-tarballs
+          cd packages/better-auth && pnpm pack --pack-destination ../../release-tarballs && cd ../..
+          cd packages/core && pnpm pack --pack-destination ../../release-tarballs && cd ../..
+          cd packages/sso && pnpm pack --pack-destination ../../release-tarballs && cd ../..
+          cd packages/scim && pnpm pack --pack-destination ../../release-tarballs && cd ../..
+          ls -la release-tarballs/
+
+      - name: Create/Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: fork-latest
+          name: "Fork Build (latest)"
+          body: "Auto-built tarballs from feat/sso-getMemberData branch. Updated on every push."
+          files: release-tarballs/*.tgz
+          prerelease: true
+          make_latest: false
