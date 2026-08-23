@@ -1,5 +1,5 @@
 import type { GenericEndpointContext, OAuth2Tokens, User } from "better-auth";
-import type { SSOOptions, SSOProvider } from "../types";
+import type { Organization, SSOOptions, SSOProvider } from "../types";
 import { domainMatches, parseProviderDomains } from "../utils";
 import type { NormalizedSSOProfile } from "./types";
 
@@ -12,6 +12,22 @@ export interface OrganizationProvisioningOptions {
 		token?: OAuth2Tokens;
 		provider: SSOProvider<SSOOptions>;
 	}) => Promise<string>;
+	getMemberData?: (data: {
+		user: User & Record<string, any>;
+		userInfo: Record<string, any>;
+		token?: OAuth2Tokens;
+		provider: SSOProvider<SSOOptions>;
+		organization: Organization & Record<string, any>;
+		defaultData: {
+			organizationId: string;
+			userId: string;
+			role: string;
+			createdAt: Date;
+		};
+	}) =>
+		| Promise<Record<string, any> | undefined>
+		| Record<string, any>
+		| undefined;
 }
 
 export interface AssignOrganizationFromProviderOptions {
@@ -210,16 +226,43 @@ async function assignOrganization(
 			})
 		: options.provisioningOptions?.defaultRole || "member";
 
+	const defaultData = {
+		organizationId,
+		userId: user.id,
+		role,
+		createdAt: new Date(),
+	};
+
+	let memberData: Record<string, any> = defaultData;
+
+	if (options.provisioningOptions?.getMemberData) {
+		const organization = await ctx.context.adapter.findOne<
+			Organization & Record<string, any>
+		>({
+			model: "organization",
+			where: [{ field: "id", value: organizationId }],
+		});
+
+		if (organization) {
+			const customData = await options.provisioningOptions.getMemberData({
+				user,
+				userInfo,
+				token,
+				provider,
+				organization,
+				defaultData,
+			});
+			if (customData) {
+				memberData = { ...defaultData, ...customData };
+			}
+		}
+	}
+
 	// FIXME(sso-membership-policy): route automatic SSO membership through the
 	// organization plugin's limits, hooks, additional fields, and atomic guard.
 	await ctx.context.adapter.create({
 		model: "member",
-		data: {
-			organizationId,
-			userId: user.id,
-			role,
-			createdAt: new Date(),
-		},
+		data: memberData,
 	});
 	return "assigned";
 }

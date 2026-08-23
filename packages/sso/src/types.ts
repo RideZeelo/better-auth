@@ -12,6 +12,21 @@ import type {
 } from "better-auth/db";
 import type { AlgorithmValidationOptions } from "./saml/algorithms";
 
+/**
+ * The organization row passed to `organizationProvisioning.getMemberData`.
+ * Deliberately narrow — only the fields every organization plugin
+ * configuration is guaranteed to have, plus any additional fields the
+ * application defined on its `organization` schema.
+ */
+export interface Organization {
+	id: string;
+	name: string;
+	slug: string;
+	logo?: string | null;
+	metadata?: Record<string, any> | null;
+	createdAt: Date;
+}
+
 export interface OIDCMapping {
 	email?: string | undefined;
 	emailVerified?: string | undefined;
@@ -482,6 +497,64 @@ export interface SSOOptions {
 					 */
 					provider: SSOProvider<SSOOptions>;
 				}) => Promise<"member" | "admin">;
+				/**
+				 * Custom function to provide additional member data when
+				 * auto-provisioning organization members via SSO.
+				 *
+				 * Use this to populate required fields on the `member` table
+				 * (e.g. a required `name`) or any additional fields defined
+				 * in the organization plugin's member schema. Runs for both
+				 * provider-bound and verified-domain provisioning.
+				 *
+				 * @example
+				 * ```ts
+				 * getMemberData: async ({ user, userInfo, defaultData }) => {
+				 *   return {
+				 *     ...defaultData,
+				 *     name: userInfo.name || user.name,
+				 *     email: user.email,
+				 *   };
+				 * }
+				 * ```
+				 */
+				getMemberData?: (data: {
+					/**
+					 * The user object from the database
+					 */
+					user: User & Record<string, any>;
+					/**
+					 * The raw user info/attributes from the SSO provider
+					 * (SAML attributes or OIDC claims). Empty for
+					 * verified-domain provisioning outside a live SSO
+					 * callback.
+					 */
+					userInfo: Record<string, any>;
+					/**
+					 * The OAuth2 tokens from the provider (OIDC only)
+					 */
+					token?: OAuth2Tokens;
+					/**
+					 * The SSO provider configuration
+					 */
+					provider: SSOProvider<SSOOptions>;
+					/**
+					 * The organization the user is being added to
+					 */
+					organization: Organization & Record<string, any>;
+					/**
+					 * The default member data that will be used if this
+					 * function is not provided or returns undefined
+					 */
+					defaultData: {
+						organizationId: string;
+						userId: string;
+						role: string;
+						createdAt: Date;
+					};
+				}) =>
+					| Promise<Record<string, any> | undefined>
+					| Record<string, any>
+					| undefined;
 		  }
 		| undefined;
 	/**
