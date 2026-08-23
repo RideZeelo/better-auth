@@ -1,0 +1,57 @@
+name: Build and Release SSO Fork
+
+# Publishes an immutable tarball for this fork's `@better-auth/sso`
+# package (the `getMemberData` patch). Only the sso package is built and
+# released here — all other packages are consumed from the unmodified
+# upstream `better-auth` npm releases.
+on:
+  push:
+    tags:
+      - "sso-v*"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm turbo run build --filter=better-auth --filter=@better-auth/core --filter=@better-auth/sso
+
+      - name: Verify package version matches tag
+        run: |
+          pkg_version=$(node -p "require('./packages/sso/package.json').version")
+          tag_version="${GITHUB_REF_NAME#sso-v}"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "Tag sso-v$tag_version does not match packages/sso/package.json version $pkg_version"
+            exit 1
+          fi
+
+      - name: Pack sso package
+        run: |
+          mkdir -p release-tarballs
+          cd packages/sso && pnpm pack --pack-destination ../../release-tarballs && cd ../..
+          ls -la release-tarballs/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "SSO fork ${{ github.ref_name }}"
+          body: |
+            Immutable build of `@better-auth/sso` from `${{ github.sha }}`, rebasing
+            the `getMemberData` organization-provisioning patch onto
+            upstream `better-auth` v1.7.1.
+          files: release-tarballs/*.tgz
+          prerelease: true
+          make_latest: false

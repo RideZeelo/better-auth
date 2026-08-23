@@ -657,6 +657,119 @@ describe("assignOrganizationByDomain", () => {
 			}),
 		).rejects.toThrow("provider lookup failed");
 	});
+
+	it("should use getMemberData hook to add additional fields to member", async () => {
+		const { data, createContext } = createTestContext();
+
+		const org = createOrg();
+		data.organization.push(org);
+		data.ssoProvider.push(
+			createProvider({ domainVerified: true, organizationId: org.id }),
+		);
+
+		const user = createUser({ name: "Alice Smith" });
+		data.user.push(user);
+
+		const getMemberDataSpy = vi.fn(
+			async ({
+				user,
+				organization,
+				defaultData,
+			}: {
+				user: User & Record<string, any>;
+				organization: Record<string, any>;
+				defaultData: Record<string, any>;
+			}) => {
+				return {
+					...defaultData,
+					customField: "custom-value",
+					memberName: user.name,
+					orgName: organization.name,
+				};
+			},
+		);
+
+		const ctx = (await createContext()) as GenericEndpointContext;
+		await assignOrganizationByDomain(ctx, {
+			user,
+			domainVerification: { enabled: true },
+			provisioningOptions: {
+				getMemberData: getMemberDataSpy,
+			},
+		});
+
+		expect(getMemberDataSpy).toHaveBeenCalledTimes(1);
+		const callArgs = getMemberDataSpy.mock.calls[0]?.[0];
+		expect(callArgs?.user.id).toBe(user.id);
+		expect(callArgs?.user.name).toBe("Alice Smith");
+		expect(callArgs?.organization.id).toBe(org.id);
+		expect(callArgs?.organization.name).toBe("Test Org");
+		expect(callArgs?.defaultData.organizationId).toBe(org.id);
+		expect(callArgs?.defaultData.userId).toBe(user.id);
+		expect(callArgs?.defaultData.role).toBe("member");
+
+		const members = data.member.filter((m) => m.userId === user.id);
+		expect(members).toHaveLength(1);
+		expect(members[0]?.organizationId).toBe(org.id);
+	});
+
+	it("should use default data when getMemberData returns undefined", async () => {
+		const { data, createContext } = createTestContext();
+
+		const org = createOrg();
+		data.organization.push(org);
+		data.ssoProvider.push(
+			createProvider({ domainVerified: true, organizationId: org.id }),
+		);
+
+		const user = createUser();
+		data.user.push(user);
+
+		const ctx = (await createContext()) as GenericEndpointContext;
+		await assignOrganizationByDomain(ctx, {
+			user,
+			domainVerification: { enabled: true },
+			provisioningOptions: {
+				getMemberData: async () => {
+					return undefined;
+				},
+			},
+		});
+
+		const members = data.member.filter((m) => m.userId === user.id);
+		expect(members).toHaveLength(1);
+		expect(members[0]?.organizationId).toBe(org.id);
+		expect(members[0]?.role).toBe("member");
+	});
+
+	it("should respect defaultRole when using getMemberData", async () => {
+		const { data, createContext } = createTestContext();
+
+		const org = createOrg();
+		data.organization.push(org);
+		data.ssoProvider.push(
+			createProvider({ domainVerified: true, organizationId: org.id }),
+		);
+
+		const user = createUser();
+		data.user.push(user);
+
+		const ctx = (await createContext()) as GenericEndpointContext;
+		await assignOrganizationByDomain(ctx, {
+			user,
+			domainVerification: { enabled: true },
+			provisioningOptions: {
+				defaultRole: "admin",
+				getMemberData: async ({ defaultData }) => {
+					return defaultData;
+				},
+			},
+		});
+
+		const members = data.member.filter((m) => m.userId === user.id);
+		expect(members).toHaveLength(1);
+		expect(members[0]?.role).toBe("admin");
+	});
 });
 
 describe("assignOrganizationFromProvider", () => {
@@ -700,6 +813,72 @@ describe("assignOrganizationFromProvider", () => {
 		expect(data.member[0]).toMatchObject({
 			organizationId,
 			role: "member",
+			userId: user.id,
+		});
+	});
+
+	it("should use getMemberData hook for provider-bound provisioning", async () => {
+		const { data, createContext } = createTestContext(false);
+
+		const user = createUser();
+		const organizationRecord = createOrg({
+			name: "Enterprise",
+			slug: "enterprise",
+		});
+		const provider = {
+			...createProvider({
+				providerId: "enterprise-provider",
+				userId: "owner-1",
+			}),
+			organizationId: organizationRecord.id,
+		};
+		data.user.push(user);
+		data.organization.push(organizationRecord);
+		data.ssoProvider.push(provider);
+
+		const getMemberDataSpy = vi.fn(
+			async ({
+				userInfo,
+				organization,
+				defaultData,
+			}: {
+				userInfo: Record<string, any>;
+				organization: Record<string, any>;
+				defaultData: Record<string, any>;
+			}) => {
+				return {
+					...defaultData,
+					department: userInfo.department,
+					organizationName: organization.name,
+				};
+			},
+		);
+
+		const ctx = (await createContext()) as GenericEndpointContext;
+		await assignOrganizationFromProvider(ctx, {
+			user,
+			provider,
+			profile: {
+				providerType: "oidc",
+				providerId: provider.providerId,
+				accountId: "enterprise-account",
+				email: user.email,
+				emailVerified: true,
+				rawAttributes: { department: "Engineering" },
+			},
+			provisioningOptions: {
+				getMemberData: getMemberDataSpy,
+			},
+		});
+
+		expect(getMemberDataSpy).toHaveBeenCalledTimes(1);
+		const callArgs = getMemberDataSpy.mock.calls[0]?.[0];
+		expect(callArgs?.userInfo.department).toBe("Engineering");
+		expect(callArgs?.organization.id).toBe(organizationRecord.id);
+
+		expect(data.member).toHaveLength(1);
+		expect(data.member[0]).toMatchObject({
+			organizationId: organizationRecord.id,
 			userId: user.id,
 		});
 	});
