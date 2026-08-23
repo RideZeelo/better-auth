@@ -74,6 +74,73 @@ export const authFlowTestSuite = createTestSuite(
 			expect(result.user).toBeDefined();
 			expect(result.user.id).toBe(signUpResult.user.id);
 		},
+		/**
+		 * @see https://github.com/better-auth/better-auth/issues/10054
+		 */
+		"should reset password with a single-use token": async () => {
+			let resetToken = "";
+			await modifyBetterAuthOptions(
+				{
+					emailAndPassword: {
+						enabled: true,
+						async sendResetPassword({ token }) {
+							resetToken = token;
+						},
+					},
+				},
+				false,
+			);
+			const auth = await getAuth();
+			const user = await generate("user");
+			const originalPassword = crypto.randomUUID();
+			const newPassword = `${crypto.randomUUID()}-new`;
+
+			const signUpResult = await auth.api.signUpEmail({
+				body: {
+					email: user.email,
+					password: originalPassword,
+					name: user.name,
+					image: user.image || "",
+				},
+			});
+
+			await auth.api.requestPasswordReset({
+				body: {
+					email: user.email,
+					redirectTo: "http://localhost:3000/reset-password",
+				},
+			});
+			expect(resetToken.length).toBeGreaterThan(10);
+
+			const resetResult = await auth.api.resetPassword({
+				body: { token: resetToken, newPassword },
+			});
+			expect(resetResult.status).toBe(true);
+
+			const oldPasswordResult = await tryCatch(
+				auth.api.signInEmail({
+					body: { email: user.email, password: originalPassword },
+				}),
+			);
+			expect(oldPasswordResult.data).toBeNull();
+			expect(oldPasswordResult.error).toBeDefined();
+
+			const newPasswordResult = await auth.api.signInEmail({
+				body: { email: user.email, password: newPassword },
+			});
+			expect(newPasswordResult.user.id).toBe(signUpResult.user.id);
+
+			const replayResult = await tryCatch(
+				auth.api.resetPassword({
+					body: {
+						token: resetToken,
+						newPassword: `${crypto.randomUUID()}-replay`,
+					},
+				}),
+			);
+			expect(replayResult.data).toBeNull();
+			expect(replayResult.error).toBeDefined();
+		},
 		"should successfully get session": async () => {
 			const auth = await getAuth();
 			const user = await generate("user");
@@ -118,26 +185,30 @@ export const authFlowTestSuite = createTestSuite(
 		},
 		"should store and retrieve timestamps correctly across timezones":
 			async () => {
-				using _ = recoverProcessTZ();
-				const auth = await getAuth();
-				const user = await generate("user");
-				const password = crypto.randomUUID();
-				const userSignUp = await auth.api.signUpEmail({
-					body: {
-						email: user.email,
-						password: password,
-						name: user.name,
-						image: user.image || "",
-					},
-				});
-				process.env.TZ = "Europe/London";
-				const userSignIn = await auth.api.signInEmail({
-					body: { email: user.email, password: password },
-				});
-				process.env.TZ = "America/Los_Angeles";
-				expect(userSignUp.user.createdAt.toISOString()).toStrictEqual(
-					userSignIn.user.createdAt.toISOString(),
-				);
+				const originalTZ = process.env.TZ;
+				try {
+					const auth = await getAuth();
+					const user = await generate("user");
+					const password = crypto.randomUUID();
+					const userSignUp = await auth.api.signUpEmail({
+						body: {
+							email: user.email,
+							password: password,
+							name: user.name,
+							image: user.image || "",
+						},
+					});
+					process.env.TZ = "Europe/London";
+					const userSignIn = await auth.api.signInEmail({
+						body: { email: user.email, password: password },
+					});
+					process.env.TZ = "America/Los_Angeles";
+					expect(userSignUp.user.createdAt.toISOString()).toStrictEqual(
+						userSignIn.user.createdAt.toISOString(),
+					);
+				} finally {
+					process.env.TZ = originalTZ;
+				}
 			},
 		"should sign up with additional fields": async () => {
 			await modifyBetterAuthOptions(
@@ -167,12 +238,3 @@ export const authFlowTestSuite = createTestSuite(
 		},
 	}),
 );
-
-function recoverProcessTZ() {
-	const originalTZ = process.env.TZ;
-	return {
-		[Symbol.dispose]: () => {
-			process.env.TZ = originalTZ;
-		},
-	};
-}

@@ -5,19 +5,20 @@ import type { AuthContext } from "../types";
 import { __getBetterAuthGlobal } from "./global";
 
 export type AuthEndpointContext = Partial<
-	InputContext<string, any, any, any, any, any> &
-		EndpointContext<string, any, any, any, any, any, any, AuthContext>
+	InputContext<string, any> & EndpointContext<string, any>
 > & {
 	context: AuthContext;
 };
 
 const ensureAsyncStorage = async () => {
 	const betterAuthGlobal = __getBetterAuthGlobal();
-	if (!betterAuthGlobal.context.endpointContextAsyncStorage) {
-		const AsyncLocalStorage = await getAsyncLocalStorage();
-		betterAuthGlobal.context.endpointContextAsyncStorage =
-			new AsyncLocalStorage<AuthEndpointContext>();
+	const existing = betterAuthGlobal.context.endpointContextAsyncStorage;
+	if (existing) {
+		return existing as AsyncLocalStorage<AuthEndpointContext>;
 	}
+	const AsyncLocalStorage = await getAsyncLocalStorage();
+	betterAuthGlobal.context.endpointContextAsyncStorage ??=
+		new AsyncLocalStorage<AuthEndpointContext>();
 	return betterAuthGlobal.context
 		.endpointContextAsyncStorage as AsyncLocalStorage<AuthEndpointContext>;
 };

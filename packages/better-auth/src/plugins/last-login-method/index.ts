@@ -3,6 +3,7 @@ import type {
 	GenericEndpointContext,
 } from "@better-auth/core";
 import { createAuthMiddleware } from "@better-auth/core/api";
+import { PACKAGE_VERSION } from "../../version";
 
 declare module "@better-auth/core" {
 	interface BetterAuthPluginRegistry<AuthOptions, Options> {
@@ -39,6 +40,20 @@ export interface LastLoginMethodOptions {
 	 */
 	storeInDatabase?: boolean | undefined;
 	/**
+	 * A hook to run before the last login method is stored in the cookie.
+	 * Useful if you are required to follow GDPR or other regulations to ensure that you're allowed to store the last login method in the cookie.
+	 *
+	 * @param ctx - The context from the hook
+	 * @param lastUsedLoginMethod - The last login method
+	 * @returns `true` to store the cookie, `false` to skip storing it (authentication continues either way)
+	 */
+	beforeStoreCookie?:
+		| ((
+				ctx: GenericEndpointContext,
+				lastUsedLoginMethod: string,
+		  ) => Promise<boolean> | boolean)
+		| undefined;
+	/**
 	 * Custom schema for the plugin
 	 * @default undefined
 	 */
@@ -63,9 +78,9 @@ export const lastLoginMethod = <O extends LastLoginMethodOptions>(
 			return null;
 		}
 
-		// Check for OAuth callbacks (/callback/:id or /oauth2/callback/:providerId)
-		if (path.startsWith("/callback/") || path.startsWith("/oauth2/callback/")) {
-			return ctx.params?.id || ctx.params?.providerId || path.split("/").pop();
+		// Check for OAuth callbacks (/callback/:id)
+		if (path.startsWith("/callback/")) {
+			return ctx.params?.id || path.split("/").pop();
 		}
 		// Check for email sign-in/sign-up
 		if (path === "/sign-in/email" || path === "/sign-up/email") {
@@ -95,6 +110,7 @@ export const lastLoginMethod = <O extends LastLoginMethodOptions>(
 
 	return {
 		id: "last-login-method",
+		version: PACKAGE_VERSION,
 		init(ctx) {
 			return {
 				options: {
@@ -165,6 +181,28 @@ export const lastLoginMethod = <O extends LastLoginMethodOptions>(
 									maxAge: config.maxAge,
 									httpOnly: false, // Override: plugin cookies are not httpOnly
 								};
+
+								let isPermitted = true;
+								if (config.beforeStoreCookie) {
+									try {
+										isPermitted = await config.beforeStoreCookie(
+											ctx,
+											lastUsedLoginMethod,
+										);
+									} catch (error) {
+										// If beforeStoreCookie throws an error, don't set the cookie
+										// Log the error but don't break the authentication flow
+										if (ctx.context.logger) {
+											ctx.context.logger.error?.(
+												"[LastLoginMethod] Error in beforeStoreCookie hook",
+												error,
+											);
+										}
+										isPermitted = false;
+									}
+								}
+
+								if (!isPermitted) return;
 
 								ctx.setCookie(
 									config.cookieName,

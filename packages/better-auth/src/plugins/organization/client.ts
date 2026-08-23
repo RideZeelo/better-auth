@@ -1,5 +1,6 @@
 import type { BetterAuthClientPlugin } from "@better-auth/core";
 import type { DBFieldAttribute } from "@better-auth/core/db";
+import type { BetterFetch } from "@better-fetch/fetch";
 import { atom } from "nanostores";
 import { useAuthQuery } from "../../client";
 import type {
@@ -11,6 +12,7 @@ import type {
 } from "../../plugins/organization/schema";
 import type { BetterAuthOptions, BetterAuthPlugin } from "../../types";
 import type { Prettify } from "../../types/helper";
+import { PACKAGE_VERSION } from "../../version";
 import type { AccessControl, ArrayElement, Role } from "../access";
 import type { defaultStatements } from "./access";
 import { adminAc, defaultRoles, memberAc, ownerAc } from "./access";
@@ -33,7 +35,7 @@ export const clientSideHasPermission = (input: HasPermissionBaseInput) => {
 	return hasPermissionFn(input, acRoles);
 };
 
-interface OrganizationClientOptions {
+export interface OrganizationClientOptions {
 	ac?: AccessControl | undefined;
 	roles?:
 		| {
@@ -124,6 +126,7 @@ export const organizationClient = <CO extends OrganizationClientOptions>(
 	type Schema = CO["schema"];
 	return {
 		id: "organization",
+		version: PACKAGE_VERSION,
 		$InferServerPlugin: {} as OrganizationPlugin<{
 			ac: CO["ac"] extends AccessControl
 				? CO["ac"]
@@ -145,7 +148,7 @@ export const organizationClient = <CO extends OrganizationClientOptions>(
 					: false;
 			};
 		}>,
-		getActions: ($fetch, _$store, co) => ({
+		getActions: ($fetch: BetterFetch, _$store, co) => ({
 			$Infer: {
 				ActiveOrganization: {} as OrganizationReturn,
 				Organization: {} as InferOrganization<CO>,
@@ -175,7 +178,7 @@ export const organizationClient = <CO extends OrganizationClientOptions>(
 				},
 			},
 		}),
-		getAtoms: ($fetch) => {
+		getAtoms: ($fetch: BetterFetch) => {
 			const listOrganizations = useAuthQuery<InferOrganization<CO>[]>(
 				$listOrg,
 				"/organization/list",
@@ -246,7 +249,7 @@ export const organizationClient = <CO extends OrganizationClientOptions>(
 			},
 			{
 				matcher(path) {
-					return path.startsWith("/organization");
+					return path === "/sign-out" || path.startsWith("/organization");
 				},
 				signal: "$activeOrgSignal",
 			},
@@ -311,7 +314,9 @@ export const inferOrgAdditionalFields = <
 	// if we don't remove all other properties we may see assignability issues
 
 	type ExtractClientOnlyFields<T> = {
-		[K in keyof T as T[K] extends { additionalFields: any } ? K : never]: T[K];
+		[K in keyof T as T[K] extends { additionalFields: unknown }
+			? K
+			: never]: T[K];
 	};
 
 	type Schema = O extends Object

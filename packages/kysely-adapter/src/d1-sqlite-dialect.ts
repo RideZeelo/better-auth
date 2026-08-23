@@ -14,12 +14,11 @@ import type {
 	SchemaMetadata,
 	TableMetadata,
 } from "kysely";
+import { SqliteAdapter, SqliteQueryCompiler } from "kysely";
 import {
 	DEFAULT_MIGRATION_LOCK_TABLE,
 	DEFAULT_MIGRATION_TABLE,
-	SqliteAdapter,
-	SqliteQueryCompiler,
-} from "kysely";
+} from "./kysely-migration-tables";
 
 class D1SqliteAdapter extends SqliteAdapter {}
 
@@ -107,8 +106,6 @@ class D1SqliteConnection implements DatabaseConnection {
 					: BigInt(results.meta.last_row_id),
 			rows: (results?.results as O[]) || [],
 			numAffectedRows,
-			// @ts-expect-error - deprecated in kysely >= 0.23, keep for backward compatibility
-			numUpdatedOrDeletedRows: numAffectedRows,
 		};
 	}
 

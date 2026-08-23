@@ -7,7 +7,7 @@ import { APIError, BASE_ERROR_CODES } from "@better-auth/core/error";
 import { createHMAC } from "@better-auth/utils/hmac";
 import { createOTP } from "@better-auth/utils/otp";
 import * as z from "zod";
-import { sessionMiddleware } from "../../api";
+import { sensitiveSessionMiddleware, sessionMiddleware } from "../../api";
 import {
 	deleteSessionCookie,
 	expireCookie,
@@ -16,7 +16,8 @@ import {
 import { symmetricEncrypt } from "../../crypto";
 import { generateRandomString } from "../../crypto/random";
 import { mergeSchema } from "../../db/schema";
-import { validatePassword } from "../../utils/password";
+import { shouldRequirePassword, validatePassword } from "../../utils/password";
+import { PACKAGE_VERSION } from "../../version";
 import type { BackupCodeOptions } from "./backup-codes";
 import { backupCode2fa, generateBackupCodes } from "./backup-codes";
 import {
@@ -28,7 +29,11 @@ import { TWO_FACTOR_ERROR_CODES } from "./error-code";
 import { otp2fa } from "./otp";
 import { schema } from "./schema";
 import { totp2fa } from "./totp";
-import type { TwoFactorOptions, UserWithTwoFactor } from "./types";
+import type {
+	TwoFactorOptions,
+	TwoFactorTable,
+	UserWithTwoFactor,
+} from "./types";
 
 export * from "./error-code";
 
@@ -39,41 +44,63 @@ declare module "@better-auth/core" {
 		};
 	}
 }
-
-const enableTwoFactorBodySchema = z.object({
-	password: z.string().meta({
-		description: "User password",
-	}),
-	issuer: z
-		.string()
-		.meta({
-			description: "Custom issuer for the TOTP URI",
-		})
-		.optional(),
-});
-
-const disableTwoFactorBodySchema = z.object({
-	password: z.string().meta({
-		description: "User password",
-	}),
-});
-
 export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 	const opts = {
 		twoFactorTable: "twoFactor",
 	};
 	const trustDeviceMaxAge =
 		options?.trustDeviceMaxAge ?? TRUST_DEVICE_COOKIE_MAX_AGE;
+	const allowPasswordless = options?.allowPasswordless;
 	const backupCodeOptions = {
 		storeBackupCodes: "encrypted",
 		...options?.backupCodeOptions,
 	} satisfies BackupCodeOptions;
-	const totp = totp2fa(options?.totpOptions);
-	const backupCode = backupCode2fa(backupCodeOptions);
+	const totp = totp2fa({
+		...options?.totpOptions,
+		allowPasswordless:
+			options?.totpOptions?.allowPasswordless ?? allowPasswordless,
+	});
+	const backupCode = backupCode2fa({
+		...backupCodeOptions,
+		allowPasswordless:
+			options?.backupCodeOptions?.allowPasswordless ?? allowPasswordless,
+	});
 	const otp = otp2fa(options?.otpOptions);
+	const passwordSchema = z.string().meta({
+		description: "User password",
+	});
+	const methodField = z.enum(["otp", "totp"]).default("totp").meta({
+		description:
+			"The 2FA method to enable. 'totp' generates an authenticator app secret (requires verification). 'otp' enables email/SMS-based codes immediately.",
+	});
+	const issuerField = z
+		.string()
+		.meta({
+			description: "Custom issuer for the TOTP URI",
+		})
+		.optional();
+	const enableTwoFactorBodySchema = allowPasswordless
+		? z.object({
+				password: passwordSchema.optional(),
+				method: methodField,
+				issuer: issuerField,
+			})
+		: z.object({
+				password: passwordSchema,
+				method: methodField,
+				issuer: issuerField,
+			});
+	const disableTwoFactorBodySchema = allowPasswordless
+		? z.object({
+				password: passwordSchema.optional(),
+			})
+		: z.object({
+				password: passwordSchema,
+			});
 
 	return {
 		id: "two-factor",
+		version: PACKAGE_VERSION,
 		endpoints: {
 			...totp.endpoints,
 			...otp.endpoints,
@@ -103,7 +130,7 @@ export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 						openapi: {
 							summary: "Enable two factor authentication",
 							description:
-								"Use this endpoint to enable two factor authentication. This will generate a TOTP URI and backup codes. Once the user verifies the TOTP URI, the two factor authentication will be enabled.",
+								"Enable two factor authentication. Pass method 'totp' (default) to set up an authenticator app (returns TOTP URI and backup codes), or 'otp' to enable email/SMS-based codes immediately.",
 							responses: {
 								200: {
 									description: "Successful response",
@@ -112,18 +139,26 @@ export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 											schema: {
 												type: "object",
 												properties: {
+													method: {
+														type: "string",
+														enum: ["otp", "totp"],
+														description: "The 2FA method that was enabled.",
+													},
 													totpURI: {
 														type: "string",
-														description: "TOTP URI",
+														description:
+															"TOTP URI for authenticator app setup. Only present when method is 'totp'.",
 													},
 													backupCodes: {
 														type: "array",
 														items: {
 															type: "string",
 														},
-														description: "Backup codes",
+														description:
+															"Recovery backup codes. Only present when method is 'totp'.",
 													},
 												},
+												required: ["method"],
 											},
 										},
 									},
@@ -134,26 +169,80 @@ export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 				},
 				async (ctx) => {
 					const user = ctx.context.session.user as UserWithTwoFactor;
-					const { password, issuer } = ctx.body;
-					const isPasswordValid = await validatePassword(ctx, {
-						password,
-						userId: user.id,
-					});
-					if (!isPasswordValid) {
+					const { password, issuer, method } = ctx.body;
+					const requirePassword = await shouldRequirePassword(
+						ctx,
+						user.id,
+						allowPasswordless,
+					);
+					if (requirePassword) {
+						if (!password) {
+							throw APIError.from(
+								"BAD_REQUEST",
+								BASE_ERROR_CODES.INVALID_PASSWORD,
+							);
+						}
+						const isPasswordValid = await validatePassword(ctx, {
+							password,
+							userId: user.id,
+						});
+						if (!isPasswordValid) {
+							throw APIError.from(
+								"BAD_REQUEST",
+								BASE_ERROR_CODES.INVALID_PASSWORD,
+							);
+						}
+					}
+
+					if (method === "otp" && !options?.otpOptions?.sendOTP) {
 						throw APIError.from(
 							"BAD_REQUEST",
-							BASE_ERROR_CODES.INVALID_PASSWORD,
+							TWO_FACTOR_ERROR_CODES.OTP_NOT_CONFIGURED,
 						);
 					}
+					if (method === "totp" && options?.totpOptions?.disable) {
+						throw APIError.from(
+							"BAD_REQUEST",
+							TWO_FACTOR_ERROR_CODES.TOTP_NOT_CONFIGURED,
+						);
+					}
+
+					if (method === "otp") {
+						const updatedUser = await ctx.context.internalAdapter.updateUser(
+							user.id,
+							{
+								twoFactorEnabled: true,
+							},
+						);
+						const newSession = await ctx.context.internalAdapter.createSession(
+							updatedUser.id,
+							false,
+							ctx.context.session.session,
+						);
+						await setSessionCookie(ctx, {
+							session: newSession,
+							user: updatedUser,
+						});
+						await ctx.context.internalAdapter.deleteSession(
+							ctx.context.session.session.token,
+						);
+						return ctx.json({ method: "otp" as const });
+					}
+
+					const backupCodes = await generateBackupCodes(
+						ctx.context.secretConfig,
+						backupCodeOptions,
+					);
+					const existingTwoFactor =
+						await ctx.context.adapter.findOne<TwoFactorTable>({
+							model: opts.twoFactorTable,
+							where: [{ field: "userId", value: user.id }],
+						});
 					const secret = generateRandomString(32);
 					const encryptedSecret = await symmetricEncrypt({
 						key: ctx.context.secretConfig,
 						data: secret,
 					});
-					const backupCodes = await generateBackupCodes(
-						ctx.context.secretConfig,
-						backupCodeOptions,
-					);
 					if (options?.skipVerificationOnEnable) {
 						const updatedUser = await ctx.context.internalAdapter.updateUser(
 							user.id,
@@ -166,43 +255,43 @@ export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 							false,
 							ctx.context.session.session,
 						);
-						/**
-						 * Update the session cookie with the new user data
-						 */
 						await setSessionCookie(ctx, {
 							session: newSession,
 							user: updatedUser,
 						});
-
-						//remove current session
 						await ctx.context.internalAdapter.deleteSession(
 							ctx.context.session.session.token,
 						);
 					}
-					//delete existing two factor
-					await ctx.context.adapter.deleteMany({
-						model: opts.twoFactorTable,
-						where: [
-							{
-								field: "userId",
-								value: user.id,
-							},
-						],
-					});
-
-					await ctx.context.adapter.create({
-						model: opts.twoFactorTable,
-						data: {
-							secret: encryptedSecret,
-							backupCodes: backupCodes.encryptedBackupCodes,
-							userId: user.id,
-						},
-					});
+					const totpData = {
+						secret: encryptedSecret,
+						backupCodes: backupCodes.encryptedBackupCodes,
+						verified:
+							(existingTwoFactor != null &&
+								existingTwoFactor.verified === true) ||
+							!!options?.skipVerificationOnEnable,
+					};
+					if (existingTwoFactor) {
+						await ctx.context.adapter.update({
+							model: opts.twoFactorTable,
+							update: totpData,
+							where: [{ field: "id", value: existingTwoFactor.id }],
+						});
+					} else {
+						await ctx.context.adapter.create({
+							model: opts.twoFactorTable,
+							data: { ...totpData, userId: user.id },
+						});
+					}
 					const totpURI = createOTP(secret, {
 						digits: options?.totpOptions?.digits || 6,
 						period: options?.totpOptions?.period,
 					}).url(issuer || options?.issuer || ctx.context.appName, user.email);
-					return ctx.json({ totpURI, backupCodes: backupCodes.backupCodes });
+					return ctx.json({
+						method: "totp" as const,
+						totpURI,
+						backupCodes: backupCodes.backupCodes,
+					});
 				},
 			),
 			/**
@@ -225,7 +314,11 @@ export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 				{
 					method: "POST",
 					body: disableTwoFactorBodySchema,
-					use: [sessionMiddleware],
+					// Disabling 2FA is a sensitive operation; require a DB-backed
+					// session so a stale or replayed cookie-cache payload cannot
+					// authorize it (defense in depth against the duplicate
+					// Set-Cookie leak fixed in cookies/expireCookie).
+					use: [sensitiveSessionMiddleware],
 					metadata: {
 						openapi: {
 							summary: "Disable two factor authentication",
@@ -254,15 +347,28 @@ export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 				async (ctx) => {
 					const user = ctx.context.session.user as UserWithTwoFactor;
 					const { password } = ctx.body;
-					const isPasswordValid = await validatePassword(ctx, {
-						password,
-						userId: user.id,
-					});
-					if (!isPasswordValid) {
-						throw APIError.from(
-							"BAD_REQUEST",
-							BASE_ERROR_CODES.INVALID_PASSWORD,
-						);
+					const requirePassword = await shouldRequirePassword(
+						ctx,
+						user.id,
+						allowPasswordless,
+					);
+					if (requirePassword) {
+						if (!password) {
+							throw APIError.from(
+								"BAD_REQUEST",
+								BASE_ERROR_CODES.INVALID_PASSWORD,
+							);
+						}
+						const isPasswordValid = await validatePassword(ctx, {
+							password,
+							userId: user.id,
+						});
+						if (!isPasswordValid) {
+							throw APIError.from(
+								"BAD_REQUEST",
+								BASE_ERROR_CODES.INVALID_PASSWORD,
+							);
+						}
 					}
 					const updatedUser = await ctx.context.internalAdapter.updateUser(
 						user.id,
@@ -411,10 +517,19 @@ export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 						}
 
 						/**
-						 * remove the session cookie. It's set by the sign in credential
+						 * Remove the session cookie set by the credential sign-in.
+						 *
+						 * The credential handler already created a session and set
+						 * `ctx.context.newSession`. Since 2FA is still pending, that
+						 * session is deleted here and `newSession` is reset to `null`
+						 * so downstream hooks don't observe a session that no longer
+						 * exists. Hooks that read `ctx.context.newSession` after a
+						 * sign-in must therefore null-check it: it is `null` while a
+						 * 2FA challenge is in flight (no authenticated session yet).
 						 */
 						deleteSessionCookie(ctx, true);
 						await ctx.context.internalAdapter.deleteSession(data.session.token);
+						ctx.context.setNewSession(null);
 						const maxAge = options?.twoFactorCookieMaxAge ?? 10 * 60; // 10 minutes
 						const twoFactorCookie = ctx.context.createAuthCookie(
 							TWO_FACTOR_COOKIE_NAME,
@@ -423,10 +538,19 @@ export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 							},
 						);
 						const identifier = `2fa-${generateRandomString(20)}`;
+						const expiresAt = new Date(Date.now() + maxAge * 1000);
 						await ctx.context.internalAdapter.createVerificationValue({
 							value: data.user.id,
 							identifier,
-							expiresAt: new Date(Date.now() + maxAge * 1000),
+							expiresAt,
+						});
+						// Per-challenge attempt counter, consumed atomically by
+						// verify-totp and verify-backup-code as the race gate so a
+						// concurrent burst cannot exceed the budget.
+						await ctx.context.internalAdapter.createVerificationValue({
+							value: "0",
+							identifier: `2fa-attempts-${identifier}`,
+							expiresAt,
 						});
 						await ctx.setSignedCookie(
 							twoFactorCookie.name,
@@ -434,8 +558,39 @@ export const twoFactor = <O extends TwoFactorOptions>(options?: O) => {
 							ctx.context.secret,
 							twoFactorCookie.attributes,
 						);
+						const twoFactorMethods: string[] = [];
+
+						/**
+						 * totp requires per-user setup, so we check
+						 * that the user actually has a secret stored.
+						 */
+						if (!options?.totpOptions?.disable) {
+							const userTotpSecret =
+								await ctx.context.adapter.findOne<TwoFactorTable>({
+									model: opts.twoFactorTable,
+									where: [
+										{
+											field: "userId",
+											value: data.user.id,
+										},
+									],
+								});
+							if (userTotpSecret && userTotpSecret.verified !== false) {
+								twoFactorMethods.push("totp");
+							}
+						}
+
+						/**
+						 * otp is server-level — if sendOTP is configured,
+						 * any user with 2fa enabled can receive a code.
+						 */
+						if (options?.otpOptions?.sendOTP) {
+							twoFactorMethods.push("otp");
+						}
+
 						return ctx.json({
 							twoFactorRedirect: true,
+							twoFactorMethods,
 						});
 					}),
 				},

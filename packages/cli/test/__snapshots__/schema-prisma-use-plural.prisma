@@ -1,10 +1,11 @@
 
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Users {
@@ -40,6 +41,7 @@ model Sessions {
 
 model Accounts {
   id                    String    @id
+  issuer                String
   accountId             String
   providerId            String
   userId                String
@@ -54,6 +56,7 @@ model Accounts {
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
+  @@unique([issuer, accountId], map: "accounts_issuer_accountId_uidx")
   @@index([userId])
   @@map("accounts")
 }

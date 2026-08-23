@@ -18,6 +18,7 @@ import {
 	electronTransferUser,
 } from "./routes";
 import type { ElectronOptions } from "./types";
+import { PACKAGE_VERSION } from "./version";
 
 declare module "@better-auth/core" {
 	interface BetterAuthPluginRegistry<AuthOptions, Options> {
@@ -41,7 +42,6 @@ export const electron = (options?: ElectronOptions | undefined) => {
 			ctx.path?.startsWith("/sign-in") ||
 			ctx.path?.startsWith("/sign-up") ||
 			ctx.path?.startsWith("/callback") ||
-			ctx.path?.startsWith("/oauth2/callback") ||
 			ctx.path?.startsWith("/magic-link/verify") ||
 			ctx.path?.startsWith("/email-otp/verify-email") ||
 			ctx.path?.startsWith("/verify-email") ||
@@ -57,15 +57,9 @@ export const electron = (options?: ElectronOptions | undefined) => {
 			client_id: string;
 			state: string;
 			code_challenge: string;
-			code_challenge_method?: string | undefined;
 		},
 	) => {
-		const {
-			client_id,
-			state,
-			code_challenge,
-			code_challenge_method = "plain",
-		} = payload;
+		const { client_id, state, code_challenge } = payload;
 		const userId =
 			ctx.context.session?.user.id || ctx.context.newSession?.user.id;
 		if (!userId || client_id !== opts.clientID) {
@@ -88,7 +82,6 @@ export const electron = (options?: ElectronOptions | undefined) => {
 			value: JSON.stringify({
 				userId,
 				codeChallenge: code_challenge,
-				codeChallengeMethod: code_challenge_method.toLowerCase(),
 				state,
 			}),
 			expiresAt,
@@ -109,22 +102,7 @@ export const electron = (options?: ElectronOptions | undefined) => {
 
 	return {
 		id: "electron",
-		async onRequest(request, _ctx) {
-			if (opts.disableOriginOverride || request.headers.get("origin")) {
-				return;
-			}
-
-			const electronOrigin = request.headers.get("electron-origin");
-			if (!electronOrigin) {
-				return;
-			}
-
-			const req = request.clone();
-			req.headers.set("origin", electronOrigin);
-			return {
-				request: req,
-			};
-		},
+		version: PACKAGE_VERSION,
 		hooks: {
 			after: [
 				{
@@ -158,7 +136,6 @@ export const electron = (options?: ElectronOptions | undefined) => {
 						const querySchema = z.object({
 							client_id: z.string(),
 							code_challenge: z.string().nonempty(),
-							code_challenge_method: z.string().optional().default("plain"),
 							state: z.string().nonempty(),
 						});
 						const cookie = ctx.context.createAuthCookie("transfer_token", {

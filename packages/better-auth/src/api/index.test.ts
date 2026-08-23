@@ -10,10 +10,10 @@ import { getEndpoints } from "./index";
 
 describe("getEndpoints", () => {
 	it("should await promise-based context before passing to middleware", async () => {
-		const mockContext = {
+		const mockContext: AuthContext = {
 			baseURL: "http://localhost:3000",
 			options: {},
-		} as AuthContext;
+		} as any;
 
 		const middlewareFn = vi.fn().mockResolvedValue({});
 
@@ -45,7 +45,6 @@ describe("getEndpoints", () => {
 			context: { customProp: "value" },
 		};
 
-		// @ts-expect-error testCtx is a partial mock
 		await middlewares[0]!.middleware(testCtx);
 
 		expect(middlewareFn).toHaveBeenCalled();
@@ -238,5 +237,56 @@ describe("skipTrailingSlashes option", () => {
 
 		// Should reach the endpoint (probably fail validation, but not 404)
 		expect(response.status).not.toBe(404);
+	});
+});
+
+describe("base path leading-prefix enforcement", () => {
+	it("rejects a path where basePath is not a leading prefix", async () => {
+		const { auth } = await getTestInstance({
+			basePath: "/api/auth",
+		});
+
+		const response = await auth.handler(
+			new Request("http://localhost:3000/x/api/auth/ok", {
+				method: "GET",
+			}),
+		);
+
+		expect(response.status).toBe(404);
+	});
+
+	it("rejects a path before basePath that targets a disabled route", async () => {
+		const { auth } = await getTestInstance({
+			basePath: "/api/auth",
+			disabledPaths: ["/sign-up/email"],
+		});
+
+		const body = JSON.stringify({
+			email: "user@example.com",
+			password: "password12345",
+			name: "Test User",
+		});
+
+		// The canonical path is rejected by `disabledPaths` in onRequest.
+		const blocked = await auth.handler(
+			new Request("http://localhost:3000/api/auth/sign-up/email", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body,
+			}),
+		);
+		expect(blocked.status).toBe(404);
+
+		// The confused variant resolves to `/sign-up/email` on a router that
+		// strips basePath anywhere. The leading-prefix router rejects it before
+		// routing, so it never reaches the endpoint or the deny-list.
+		const confused = await auth.handler(
+			new Request("http://localhost:3000/x/api/auth/sign-up/email", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body,
+			}),
+		);
+		expect(confused.status).toBe(404);
 	});
 });

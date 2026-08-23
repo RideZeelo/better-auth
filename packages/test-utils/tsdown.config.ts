@@ -5,8 +5,8 @@ export default defineConfig({
 	format: ["esm"],
 	entry: {
 		adapter: "./src/adapter/index.ts",
+		scim: "./src/scim-lifecycle.ts",
 	},
-	sourcemap: true,
 	unbundle: true,
 	outDir: "./dist",
 	clean: true,

@@ -7,7 +7,6 @@ import open from "open";
 import prompts from "prompts";
 import yoctoSpinner from "yocto-spinner";
 import * as z from "zod";
-import { cliVersion } from "../..";
 import { generateDrizzleSchema } from "../../generators/drizzle";
 import { generatePrismaSchema } from "../../generators/prisma";
 import {
@@ -22,6 +21,7 @@ import {
 import { getPackageInfo, hasDependency } from "../../utils/get-package-info";
 import { generateSecretHash, tryCatch } from "../../utils/helper";
 import { installDependencies } from "../../utils/install-dependencies";
+import { cliVersion } from "../../version";
 import type { DatabaseAdapter } from "./configs/databases.config";
 import type { Framework } from "./configs/frameworks.config";
 import { FRAMEWORKS } from "./configs/frameworks.config";
@@ -1672,7 +1672,7 @@ for (const plugin of Object.values(
 
 export const init = initBuilder.action(initAction);
 
-export const initActionOptionsSchema = z.object({
+const initActionOptionsSchema = z.object({
 	cwd: z.string().transform((val) => path.resolve(val)),
 	config: z.string().optional(),
 	packageManager: z.enum(PACKAGE_MANAGER).optional(),
