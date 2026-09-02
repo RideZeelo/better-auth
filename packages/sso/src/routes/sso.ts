@@ -81,6 +81,7 @@ import {
 } from "../user-resolution";
 import {
 	domainMatches,
+	normalizeSsoAttributes,
 	parseProviderEmailVerified,
 	safeJsonParse,
 	validateEmailDomain,
@@ -1645,6 +1646,11 @@ async function handleOIDCCallback(
 	}
 	const userInfoEmail = userInfo.email;
 	const userInfoId = userInfo.id;
+	const isTrustedProvider =
+		"domainVerified" in provider &&
+		(provider as { domainVerified?: boolean }).domainVerified === true &&
+		validateEmailDomain(userInfoEmail, provider.domain);
+	userInfo.emailVerified ||= isTrustedProvider;
 	const providerUserAttributes = Object.fromEntries(
 		Object.entries(userInfo).filter(([key]) => key !== "id"),
 	);
@@ -1653,9 +1659,7 @@ async function handleOIDCCallback(
 		email: userInfoEmail,
 		name: typeof userInfo.name === "string" ? userInfo.name : "",
 		image: typeof userInfo.image === "string" ? userInfo.image : undefined,
-		emailVerified: options?.trustEmailVerified
-			? userInfo.emailVerified === true
-			: false,
+		emailVerified: userInfo.emailVerified === true,
 	};
 	const accountKey = {
 		issuer:
@@ -1663,10 +1667,6 @@ async function handleOIDCCallback(
 			provider.issuer,
 		accountId: userInfoId,
 	};
-	const isTrustedProvider =
-		"domainVerified" in provider &&
-		(provider as { domainVerified?: boolean }).domainVerified === true &&
-		validateEmailDomain(userInfoEmail, provider.domain);
 
 	let linked: Awaited<ReturnType<typeof handleOAuthUserInfo>>;
 	try {
@@ -1799,6 +1799,7 @@ async function handleOIDCCallback(
 		await options.provisionUser({
 			user,
 			userInfo,
+			attributes: normalizeSsoAttributes(rawProfile ?? userInfo),
 			token: tokenResponse,
 			provider,
 		});
@@ -1812,7 +1813,7 @@ async function handleOIDCCallback(
 			accountId: userInfoId,
 			email: userInfoEmail,
 			emailVerified: Boolean(userInfo.emailVerified),
-			rawAttributes: userInfo,
+			rawAttributes: rawProfile ?? userInfo,
 		},
 		provider,
 		token: tokenResponse,
