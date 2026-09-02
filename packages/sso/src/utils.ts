@@ -146,3 +146,53 @@ export function maskClientId(clientId: string): string {
 	}
 	return `****${clientId.slice(-4)}`;
 }
+
+export type NormalizedSsoAttributes = Record<string, string | string[]>;
+
+export function normalizeSsoAttributes(
+	input: Record<string, unknown> | null | undefined,
+): NormalizedSsoAttributes {
+	if (!input) {
+		return {};
+	}
+
+	const attributes: NormalizedSsoAttributes = {};
+	for (const [key, value] of Object.entries(input)) {
+		if (value === null || value === undefined) {
+			continue;
+		}
+
+		if (typeof value === "string") {
+			const trimmed = value.trim();
+			if (trimmed) {
+				attributes[key] = trimmed;
+			}
+			continue;
+		}
+
+		if (typeof value === "number" || typeof value === "boolean") {
+			attributes[key] = String(value);
+			continue;
+		}
+
+		if (Array.isArray(value)) {
+			const normalized = value
+				.flatMap((entry) => {
+					if (typeof entry === "string") {
+						const trimmed = entry.trim();
+						return trimmed ? [trimmed] : [];
+					}
+					if (typeof entry === "number" || typeof entry === "boolean") {
+						return [String(entry)];
+					}
+					return [];
+				})
+				.filter(Boolean);
+			if (normalized.length > 0) {
+				attributes[key] = normalized;
+			}
+		}
+	}
+
+	return attributes;
+}
