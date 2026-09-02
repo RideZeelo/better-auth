@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	domainMatches,
+	normalizeSsoAttributes,
 	parseProviderDomains,
 	parseProviderEmailVerified,
 	validateEmailDomain,
@@ -202,5 +203,19 @@ describe("parseProviderDomains hostname normalization", () => {
 
 	it("should return null for an empty string", () => {
 		expect(parseProviderDomains("")).toBeNull();
+	});
+});
+
+describe("normalizeSsoAttributes", () => {
+	it("normalizes scalar and array claim values", () => {
+		expect(
+			normalizeSsoAttributes({
+				groups: ["Admins", "  ", 42],
+				department: "Engineering",
+			}),
+		).toEqual({
+			groups: ["Admins", "42"],
+			department: "Engineering",
+		});
 	});
 });

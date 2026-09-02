@@ -452,13 +452,8 @@ export interface SSOOptions {
 				 * The user info object from the provider
 				 */
 				userInfo: Record<string, any>;
-				/**
-				 * The OAuth2 tokens from the provider
-				 */
+				attributes: Record<string, string | string[]>;
 				token?: OAuth2Tokens;
-				/**
-				 * The SSO provider
-				 */
 				provider: SSOProvider<SSOOptions>;
 		  }) => Awaitable<void>)
 		| undefined;
@@ -529,13 +524,8 @@ export interface SSOOptions {
 					 * callback.
 					 */
 					userInfo: Record<string, any>;
-					/**
-					 * The OAuth2 tokens from the provider (OIDC only)
-					 */
+					attributes: Record<string, string | string[]>;
 					token?: OAuth2Tokens;
-					/**
-					 * The SSO provider configuration
-					 */
 					provider: SSOProvider<SSOOptions>;
 					/**
 					 * The organization the user is being added to
