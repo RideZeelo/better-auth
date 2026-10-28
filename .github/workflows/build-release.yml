@@ -51,7 +51,7 @@ jobs:
           body: |
             Immutable build of `@better-auth/sso` from `${{ github.sha }}`, rebasing
             the `getMemberData` organization-provisioning patch onto
-            upstream `better-auth` v1.7.1.
+            upstream `better-auth` v1.7.14.
           files: release-tarballs/*.tgz
           prerelease: true
           make_latest: false

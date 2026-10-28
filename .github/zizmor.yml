@@ -16,9 +16,17 @@ rules:
       # labels can be applied to fork PRs.
       - auto-label.yml
       # Intentional: creates backports for already-merged PRs or maintainer
-      # slash commands. Checkout persists no credentials; the action receives
-      # an explicit token and does not execute fork PR code.
+      # slash commands. The pinned action retains a scoped token to push the
+      # generated branch but does not execute checked-out repository code.
       - backport.yml
+      # Intentional: runs trusted code from main and validates the triggering
+      # branch and commit before creating a token. It never executes that revision.
+      - sync-version-docs.yml
+      # Intentional: /changeset and /release-notes gate on author_association
+      # and check out the default branch, reading the PR only as git data or
+      # through the GitHub API. The changeset apply job never checks out code.
+      - auto-changeset.yml
+      - release-notes-command.yml
   use-trusted-publishing:
     ignore:
       # Intentional: pkg.pr.new publishes ephemeral PR preview packages, not npm
