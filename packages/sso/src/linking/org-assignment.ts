@@ -1,6 +1,15 @@
 import type { GenericEndpointContext, OAuth2Tokens, User } from "better-auth";
-import type { Organization, SSOOptions, SSOProvider } from "../types";
-import { domainMatches, parseProviderDomains } from "../utils";
+import type {
+	NormalizedSSOAttributes,
+	Organization,
+	SSOOptions,
+	SSOProvider,
+} from "../types";
+import {
+	domainMatches,
+	normalizeSsoAttributes,
+	parseProviderDomains,
+} from "../utils";
 import type { NormalizedSSOProfile } from "./types";
 
 export interface OrganizationProvisioningOptions {
@@ -9,12 +18,14 @@ export interface OrganizationProvisioningOptions {
 	getRole?: (data: {
 		user: User & Record<string, any>;
 		userInfo: Record<string, any>;
+		attributes: NormalizedSSOAttributes;
 		token?: OAuth2Tokens;
 		provider: SSOProvider<SSOOptions>;
 	}) => Promise<string>;
 	getMemberData?: (data: {
 		user: User & Record<string, any>;
 		userInfo: Record<string, any>;
+		attributes: NormalizedSSOAttributes;
 		token?: OAuth2Tokens;
 		provider: SSOProvider<SSOOptions>;
 		organization: Organization & Record<string, any>;
@@ -123,6 +134,7 @@ async function assignOrganization(
 	let provider: SSOProvider<SSOOptions>;
 	let organizationId: string;
 	let userInfo: Record<string, unknown>;
+	let attributes: NormalizedSSOAttributes = {};
 	let token: OAuth2Tokens | undefined;
 
 	if (options.reason === "provider-bound") {
@@ -132,7 +144,8 @@ async function assignOrganization(
 		user = options.user;
 		provider = options.provider;
 		organizationId = options.provider.organizationId;
-		userInfo = options.profile.rawAttributes || {};
+		userInfo = options.profile.rawAttributes ?? {};
+		attributes = normalizeSsoAttributes(userInfo);
 		token = options.token;
 	} else {
 		if (!options.domainVerification?.enabled) {
@@ -221,6 +234,7 @@ async function assignOrganization(
 		? await options.provisioningOptions.getRole({
 				user,
 				userInfo,
+				attributes,
 				token,
 				provider,
 			})
@@ -247,6 +261,7 @@ async function assignOrganization(
 			const customData = await options.provisioningOptions.getMemberData({
 				user,
 				userInfo,
+				attributes,
 				token,
 				provider,
 				organization,

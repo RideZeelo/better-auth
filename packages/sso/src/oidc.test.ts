@@ -1016,9 +1016,41 @@ describe("provisioning", async (ctx) => {
 describe("provisionUser should only be called for new users", async () => {
 	const provisionUserFn = vi.fn();
 	const validateUserInfoFn = vi.fn();
+	const getRoleFn = vi.fn(
+		async ({
+			attributes,
+		}: {
+			attributes: Record<string, string | string[]>;
+		}) =>
+			Array.isArray(attributes.groups) && attributes.groups.includes("admins")
+				? "admin"
+				: "member",
+	);
+	const getMemberDataFn = vi.fn(
+		async ({
+			attributes,
+			defaultData,
+		}: {
+			attributes: Record<string, string | string[]>;
+			defaultData: Record<string, unknown>;
+		}) => ({
+			...defaultData,
+			providerGroups: Array.isArray(attributes.groups)
+				? attributes.groups.join(",")
+				: "",
+		}),
+	);
+	let oidcIdentity = {
+		email: "provision-test@localhost.com",
+		sub: "provision-test-sub",
+	};
+	let oidcGroups: string[] = [];
+	let oidcUserInfoEmailVerified: boolean | undefined = false;
+	let oidcIdTokenEmailVerified: boolean | undefined = false;
+	let userInfoRequestCount = 0;
 	const { auth, signInWithTestUser, customFetchImpl, cookieSetter } =
 		await getTestInstance({
-			trustedOrigins: ["http://localhost:8080"],
+			trustedOrigins: ["http://localhost:8082"],
 			user: {
 				validateUserInfo({ source }) {
 					if (source.method === "sso-oidc") {
@@ -1029,8 +1061,24 @@ describe("provisionUser should only be called for new users", async () => {
 			plugins: [
 				sso({
 					provisionUser: provisionUserFn,
+					organizationProvisioning: {
+						getRole: getRoleFn,
+						getMemberData: getMemberDataFn,
+					},
+					domainVerification: {
+						enabled: true,
+						trustEmailOwnership: true,
+					},
 				}),
-				organization(),
+				organization({
+					schema: {
+						member: {
+							additionalFields: {
+								providerGroups: { type: "string", required: false },
+							},
+						},
+					},
+				}),
 			],
 		});
 
@@ -1047,23 +1095,25 @@ describe("provisionUser should only be called for new users", async () => {
 		server.service.removeAllListeners("beforeUserinfo");
 		server.service.removeAllListeners("beforeTokenSigning");
 		server.service.on("beforeUserinfo", (userInfoResponse) => {
+			userInfoRequestCount += 1;
 			userInfoResponse.body = {
-				email: "provision-test@localhost.com",
+				email: oidcIdentity.email,
 				name: "Provision Test",
-				sub: "provision-test-sub",
+				sub: oidcIdentity.sub,
 				picture: "https://test.com/picture.png",
-				email_verified: true,
+				email_verified: oidcUserInfoEmailVerified,
+				groups: oidcGroups,
 			};
 			userInfoResponse.statusCode = 200;
 		});
 		server.service.on("beforeTokenSigning", (token) => {
-			token.payload.sub = "provision-test-sub";
-			token.payload.email = "provision-test@localhost.com";
-			token.payload.email_verified = true;
+			token.payload.sub = oidcIdentity.sub;
+			token.payload.email = oidcIdentity.email;
+			token.payload.email_verified = oidcIdTokenEmailVerified;
 			token.payload.name = "Provision Test";
 			token.payload.picture = "https://test.com/picture.png";
 		});
-		await server.start(8080, "localhost");
+		await server.start(8082, "localhost");
 	});
 
 	afterAll(async () => {
@@ -1097,30 +1147,54 @@ describe("provisionUser should only be called for new users", async () => {
 		return { callbackURL, headers: newHeaders };
 	}
 
+	async function ensurePersistedProvider(
+		headers: Headers,
+		providerId: string,
+		domain = "localhost.com",
+		organizationId?: string,
+		domainVerified = true,
+	) {
+		const context = await auth.$context;
+		const existing = await context.adapter.findOne({
+			model: "ssoProvider",
+			where: [{ field: "providerId", value: providerId }],
+		});
+		if (!existing) {
+			await auth.api.registerSSOProvider({
+				body: {
+					issuer: server.issuer.url!,
+					domain,
+					oidcConfig: {
+						clientId: "test",
+						clientSecret: "test",
+						authorizationEndpoint: `${server.issuer.url}/authorize`,
+						tokenEndpoint: `${server.issuer.url}/token`,
+						jwksEndpoint: `${server.issuer.url}/jwks`,
+						discoveryEndpoint: `${server.issuer.url}/.well-known/openid-configuration`,
+						mapping: {
+							email: "email",
+							emailVerified: "email_verified",
+							name: "name",
+							image: "picture",
+						},
+					},
+					providerId,
+					...(organizationId ? { organizationId } : {}),
+				},
+				headers,
+			});
+		}
+		await context.adapter.update({
+			model: "ssoProvider",
+			where: [{ field: "providerId", value: providerId }],
+			update: { domainVerified },
+		});
+	}
+
 	it("should call provisionUser only on first sign-in (new user), not on subsequent sign-ins", async () => {
 		const { headers } = await signInWithTestUser();
-		await auth.api.registerSSOProvider({
-			body: {
-				issuer: server.issuer.url!,
-				domain: "localhost.com",
-				oidcConfig: {
-					clientId: "test",
-					clientSecret: "test",
-					authorizationEndpoint: `${server.issuer.url}/authorize`,
-					tokenEndpoint: `${server.issuer.url}/token`,
-					jwksEndpoint: `${server.issuer.url}/jwks`,
-					discoveryEndpoint: `${server.issuer.url}/.well-known/openid-configuration`,
-					mapping: {
-						email: "email",
-						emailVerified: "email_verified",
-						name: "name",
-						image: "picture",
-					},
-				},
-				providerId: "provision-test",
-			},
-			headers,
-		});
+		await ensurePersistedProvider(headers, "provision-test");
+		const context = await auth.$context;
 
 		provisionUserFn.mockClear();
 		validateUserInfoFn.mockClear();
@@ -1137,6 +1211,20 @@ describe("provisionUser should only be called for new users", async () => {
 		});
 		await simulateOAuthFlow(res1.url, signInHeaders1);
 		expect(provisionUserFn).toHaveBeenCalledTimes(1);
+		expect(provisionUserFn.mock.calls[0]?.[0].user.emailVerified).toBe(true);
+		expect(provisionUserFn.mock.calls[0]?.[0].attributes).toEqual({
+			email: "provision-test@localhost.com",
+			name: "Provision Test",
+			sub: "provision-test-sub",
+			picture: "https://test.com/picture.png",
+			email_verified: "false",
+		});
+		expect(
+			await context.adapter.findOne<{ emailVerified: boolean }>({
+				model: "user",
+				where: [{ field: "email", value: "provision-test@localhost.com" }],
+			}),
+		).toMatchObject({ emailVerified: true });
 		expect(validateUserInfoFn).toHaveBeenCalledTimes(1);
 		expect(validateUserInfoFn.mock.calls[0]?.[0]).toMatchObject({
 			action: "create-user",
@@ -1173,6 +1261,340 @@ describe("provisionUser should only be called for new users", async () => {
 		});
 		expect(validateUserInfoFn.mock.calls[1]?.[0].oauth).toBeUndefined();
 	});
+
+	it("requires local email verification before linking an existing account", async () => {
+		const { headers } = await signInWithTestUser();
+		await ensurePersistedProvider(headers, "provision-test");
+		const context = await auth.$context;
+		const unverifiedEmail = "unverified-link@localhost.com";
+		const localSignup = await auth.api.signUpEmail({
+			body: {
+				email: unverifiedEmail,
+				password: "test-password-123",
+				name: "Unverified Local User",
+			},
+		});
+		const sessionsBefore = await context.adapter.findMany({
+			model: "session",
+			where: [{ field: "userId", value: localSignup.user.id }],
+		});
+		provisionUserFn.mockClear();
+		oidcIdentity = { email: unverifiedEmail, sub: "unverified-link-sub" };
+
+		const unverifiedHeaders = new Headers();
+		const unverifiedSignIn = await authClient.signIn.sso({
+			providerId: "provision-test",
+			email: unverifiedEmail,
+			callbackURL: "/dashboard",
+			fetchOptions: {
+				throw: true,
+				onSuccess: cookieSetter(unverifiedHeaders),
+			},
+		});
+		const unverifiedResult = await simulateOAuthFlow(
+			unverifiedSignIn.url,
+			unverifiedHeaders,
+		);
+		expect(
+			new URL(unverifiedResult.callbackURL).searchParams.get("error"),
+		).toBe("account not linked");
+		expect(
+			await context.adapter.findOne({
+				model: "account",
+				where: [
+					{ field: "providerId", value: "provision-test" },
+					{ field: "accountId", value: "unverified-link-sub" },
+				],
+			}),
+		).toBeNull();
+		expect(provisionUserFn).not.toHaveBeenCalled();
+		expect(
+			await context.adapter.findOne<{ emailVerified: boolean; name: string }>({
+				model: "user",
+				where: [{ field: "id", value: localSignup.user.id }],
+			}),
+		).toMatchObject({ emailVerified: false, name: "Unverified Local User" });
+		expect(
+			await context.adapter.findMany({
+				model: "session",
+				where: [{ field: "userId", value: localSignup.user.id }],
+			}),
+		).toHaveLength(sessionsBefore.length);
+
+		for (const [index, rawVerifiedClaim] of [
+			true,
+			false,
+			undefined,
+		].entries()) {
+			const unmatchedEmail = `unmatched-${index}@outside.example`;
+			const unmatchedSub = `unmatched-link-${index}-sub`;
+			const unmatchedSignup = await auth.api.signUpEmail({
+				body: {
+					email: unmatchedEmail,
+					password: "test-password-123",
+					name: "Unmatched Local User",
+				},
+			});
+			const unmatchedSessions = await context.adapter.findMany({
+				model: "session",
+				where: [{ field: "userId", value: unmatchedSignup.user.id }],
+			});
+			oidcIdentity = { email: unmatchedEmail, sub: unmatchedSub };
+			oidcUserInfoEmailVerified = rawVerifiedClaim;
+			const unmatchedHeaders = new Headers();
+			const unmatchedSignIn = await authClient.signIn.sso({
+				providerId: "provision-test",
+				email: unmatchedEmail,
+				callbackURL: "/dashboard",
+				fetchOptions: {
+					throw: true,
+					onSuccess: cookieSetter(unmatchedHeaders),
+				},
+			});
+			const unmatchedResult = await simulateOAuthFlow(
+				unmatchedSignIn.url,
+				unmatchedHeaders,
+			);
+			expect(
+				new URL(unmatchedResult.callbackURL).searchParams.get("error"),
+			).toBe("account not linked");
+			expect(
+				await context.adapter.findOne({
+					model: "account",
+					where: [
+						{ field: "providerId", value: "provision-test" },
+						{ field: "accountId", value: unmatchedSub },
+					],
+				}),
+			).toBeNull();
+			expect(
+				await context.adapter.findOne<{ emailVerified: boolean }>({
+					model: "user",
+					where: [{ field: "id", value: unmatchedSignup.user.id }],
+				}),
+			).toMatchObject({ emailVerified: false });
+			expect(
+				await context.adapter.findMany({
+					model: "session",
+					where: [{ field: "userId", value: unmatchedSignup.user.id }],
+				}),
+			).toHaveLength(unmatchedSessions.length);
+			expect(provisionUserFn).not.toHaveBeenCalled();
+		}
+
+		const verifiedEmail = "verified-link@localhost.com";
+		const verifiedUser = await auth.api.signUpEmail({
+			body: {
+				email: verifiedEmail,
+				password: "test-password-123",
+				name: "Verified Local User",
+			},
+		});
+		await context.adapter.update({
+			model: "user",
+			where: [{ field: "id", value: verifiedUser.user.id }],
+			update: { emailVerified: true },
+		});
+		oidcIdentity = { email: verifiedEmail, sub: "verified-link-sub" };
+
+		const verifiedHeaders = new Headers();
+		const verifiedSignIn = await authClient.signIn.sso({
+			providerId: "provision-test",
+			email: verifiedEmail,
+			callbackURL: "/dashboard",
+			fetchOptions: {
+				throw: true,
+				onSuccess: cookieSetter(verifiedHeaders),
+			},
+		});
+		const verifiedResult = await simulateOAuthFlow(
+			verifiedSignIn.url,
+			verifiedHeaders,
+		);
+		expect(verifiedResult.callbackURL).toContain("/dashboard");
+		expect(
+			await context.adapter.findOne({
+				model: "account",
+				where: [
+					{ field: "providerId", value: "provision-test" },
+					{ field: "accountId", value: "verified-link-sub" },
+				],
+			}),
+		).not.toBeNull();
+	});
+
+	it("uses verified ID-token claims when the provider has no UserInfo endpoint", async () => {
+		const { headers } = await signInWithTestUser();
+		await auth.api.registerSSOProvider({
+			body: {
+				issuer: server.issuer.url!,
+				domain: "localhost.com",
+				providerId: "provision-id-token-only",
+				oidcConfig: {
+					clientId: "test",
+					clientSecret: "test",
+					skipDiscovery: true,
+					authorizationEndpoint: `${server.issuer.url}/authorize`,
+					tokenEndpoint: `${server.issuer.url}/token`,
+					jwksEndpoint: `${server.issuer.url}/jwks`,
+					mapping: {
+						email: "email",
+						emailVerified: "email_verified",
+						name: "name",
+					},
+				},
+			},
+			headers,
+		});
+		const context = await auth.$context;
+		await context.adapter.update({
+			model: "ssoProvider",
+			where: [{ field: "providerId", value: "provision-id-token-only" }],
+			update: { domainVerified: true },
+		});
+		oidcIdentity = {
+			email: "id-token-only@localhost.com",
+			sub: "id-token-only-sub",
+		};
+		oidcIdTokenEmailVerified = true;
+		provisionUserFn.mockClear();
+		userInfoRequestCount = 0;
+
+		const signInHeaders = new Headers();
+		const signIn = await authClient.signIn.sso({
+			providerId: "provision-id-token-only",
+			email: oidcIdentity.email,
+			callbackURL: "/dashboard",
+			fetchOptions: {
+				throw: true,
+				onSuccess: cookieSetter(signInHeaders),
+			},
+		});
+		const result = await simulateOAuthFlow(signIn.url, signInHeaders);
+		expect(result.callbackURL).toContain("/dashboard");
+		expect(userInfoRequestCount).toBe(0);
+		expect(provisionUserFn.mock.calls[0]?.[0].user.emailVerified).toBe(true);
+		expect(provisionUserFn.mock.calls[0]?.[0].attributes).toMatchObject({
+			email: oidcIdentity.email,
+			sub: oidcIdentity.sub,
+			email_verified: "true",
+		});
+		expect(
+			await context.adapter.findOne({
+				model: "account",
+				where: [
+					{ field: "providerId", value: "provision-id-token-only" },
+					{ field: "accountId", value: oidcIdentity.sub },
+				],
+			}),
+		).not.toBeNull();
+		expect(
+			await context.adapter.findOne<{ emailVerified: boolean }>({
+				model: "user",
+				where: [{ field: "email", value: oidcIdentity.email }],
+			}),
+		).toMatchObject({ emailVerified: true });
+		oidcIdTokenEmailVerified = false;
+	});
+
+	it("forwards unmapped raw claims to OIDC organization callbacks and persists their results", async () => {
+		const { headers } = await signInWithTestUser();
+		const organizationRecord = await auth.api.createOrganization({
+			body: { name: "Claims Org", slug: "oidc-claims-org" },
+			headers,
+		});
+		await ensurePersistedProvider(
+			headers,
+			"provision-attributes-test",
+			"localhost.com",
+			organizationRecord.id,
+		);
+		oidcIdentity = {
+			email: "claims-test@localhost.com",
+			sub: "claims-test-sub",
+		};
+		oidcGroups = [" Engineering ", " admins "];
+		getRoleFn.mockClear();
+		getMemberDataFn.mockClear();
+
+		const signInHeaders = new Headers();
+		const signIn = await authClient.signIn.sso({
+			providerId: "provision-attributes-test",
+			callbackURL: "/dashboard",
+			fetchOptions: {
+				throw: true,
+				onSuccess: cookieSetter(signInHeaders),
+			},
+		});
+		const result = await simulateOAuthFlow(signIn.url, signInHeaders);
+		expect(result.callbackURL).toContain("/dashboard");
+		const rawGroups = [" Engineering ", " admins "];
+		const normalizedAttributes = { groups: ["Engineering", "admins"] };
+		const expectedCallbackArgs = expect.objectContaining({
+			userInfo: expect.objectContaining({ groups: rawGroups }),
+			attributes: expect.objectContaining(normalizedAttributes),
+		});
+		expect(getRoleFn).toHaveBeenCalledWith(expectedCallbackArgs);
+		expect(getMemberDataFn).toHaveBeenCalledWith(expectedCallbackArgs);
+
+		const context = await auth.$context;
+		const user = await context.adapter.findOne<{ id: string }>({
+			model: "user",
+			where: [{ field: "email", value: oidcIdentity.email }],
+		});
+		expect(user).not.toBeNull();
+		const member = await context.adapter.findOne<{
+			role: string;
+			providerGroups: string;
+		}>({
+			model: "member",
+			where: [
+				{ field: "organizationId", value: organizationRecord.id },
+				{ field: "userId", value: user?.id ?? "" },
+			],
+		});
+		expect(member).toMatchObject({
+			role: "admin",
+			providerGroups: "Engineering,admins",
+		});
+	});
+
+	it("rejects an unverified persisted OIDC domain before writing authentication data", async () => {
+		const { headers } = await signInWithTestUser();
+		await ensurePersistedProvider(
+			headers,
+			"unverified-domain-provider",
+			"localhost.com",
+			undefined,
+			false,
+		);
+		const context = await auth.$context;
+		const before = {
+			users: await context.adapter.findMany({ model: "user" }),
+			accounts: await context.adapter.findMany({ model: "account" }),
+			sessions: await context.adapter.findMany({ model: "session" }),
+		};
+		provisionUserFn.mockClear();
+
+		await expect(
+			auth.api.signInSSO({
+				body: {
+					providerId: "unverified-domain-provider",
+					callbackURL: "/dashboard",
+				},
+			}),
+		).rejects.toThrow(/Provider domain has not been verified/);
+		expect(await context.adapter.findMany({ model: "user" })).toHaveLength(
+			before.users.length,
+		);
+		expect(await context.adapter.findMany({ model: "account" })).toHaveLength(
+			before.accounts.length,
+		);
+		expect(await context.adapter.findMany({ model: "session" })).toHaveLength(
+			before.sessions.length,
+		);
+		expect(provisionUserFn).not.toHaveBeenCalled();
+	});
 });
 
 /**
@@ -1182,7 +1604,7 @@ describe("provisionUserOnEveryLogin should call provisionUser on every sign-in",
 	const provisionUserFn = vi.fn();
 	const { auth, signInWithTestUser, customFetchImpl, cookieSetter } =
 		await getTestInstance({
-			trustedOrigins: ["http://localhost:8080"],
+			trustedOrigins: ["http://localhost:8083"],
 			plugins: [
 				sso({
 					provisionUser: provisionUserFn,
@@ -1221,7 +1643,7 @@ describe("provisionUserOnEveryLogin should call provisionUser on every sign-in",
 			token.payload.name = "Provision Every Login";
 			token.payload.picture = "https://test.com/picture.png";
 		});
-		await server.start(8080, "localhost");
+		await server.start(8083, "localhost");
 	});
 
 	afterAll(async () => {
@@ -1294,6 +1716,7 @@ describe("provisionUserOnEveryLogin should call provisionUser on every sign-in",
 		});
 		await simulateOAuthFlow(res1.url, signInHeaders1);
 		expect(provisionUserFn).toHaveBeenCalledTimes(1);
+		expect(provisionUserFn.mock.calls[0]?.[0].user.emailVerified).toBe(false);
 
 		provisionUserFn.mockClear();
 
@@ -1478,39 +1901,44 @@ describe("SSO shared redirectURI", async () => {
 });
 
 describe("OIDC SSO with defaultSSO array", async () => {
-	const { customFetchImpl, cookieSetter } = await getTestInstance({
-		trustedOrigins: ["http://localhost:8080"],
+	const { auth, customFetchImpl, cookieSetter } = await getTestInstance({
+		trustedOrigins: ["http://localhost:8084"],
 		plugins: [
 			sso({
+				trustEmailVerified: true,
+				domainVerification: {
+					enabled: true,
+					trustEmailOwnership: true,
+				},
 				defaultSSO: [
 					{
 						domain: "default-oidc.com",
 						providerId: "default-oidc-provider",
 						oidcConfig: {
-							issuer: "http://localhost:8080",
+							issuer: "http://localhost:8084",
 							clientId: "default-client",
 							clientSecret: "default-secret",
 							pkce: false,
 							// No explicit authorizationEndpoint / tokenEndpoint / jwksEndpoint
 							// All resolved via OIDC discovery
 							discoveryEndpoint:
-								"http://localhost:8080/.well-known/openid-configuration",
+								"http://localhost:8084/.well-known/openid-configuration",
 						},
 					},
 					{
 						domain: "default-oidc-explicit.com",
 						providerId: "default-oidc-provider-explicit",
 						oidcConfig: {
-							issuer: "http://localhost:8080",
+							issuer: "http://localhost:8084",
 							clientId: "explicit-client",
 							clientSecret: "explicit-secret",
 							pkce: false,
 							// All endpoints set explicitly – discovery should be skipped
-							authorizationEndpoint: "http://localhost:8080/authorize",
-							tokenEndpoint: "http://localhost:8080/token",
-							jwksEndpoint: "http://localhost:8080/jwks",
+							authorizationEndpoint: "http://localhost:8084/authorize",
+							tokenEndpoint: "http://localhost:8084/token",
+							jwksEndpoint: "http://localhost:8084/jwks",
 							discoveryEndpoint:
-								"http://localhost:8080/.well-known/openid-configuration",
+								"http://localhost:8084/.well-known/openid-configuration",
 						},
 					},
 					{
@@ -1518,15 +1946,15 @@ describe("OIDC SSO with defaultSSO array", async () => {
 							"https://default-oidc-normalized.com/path,default-oidc-secondary.com",
 						providerId: "default-oidc-provider-normalized",
 						oidcConfig: {
-							issuer: "http://localhost:8080",
+							issuer: "http://localhost:8084",
 							clientId: "normalized-client",
 							clientSecret: "normalized-secret",
 							pkce: false,
-							authorizationEndpoint: "http://localhost:8080/authorize",
-							tokenEndpoint: "http://localhost:8080/token",
-							jwksEndpoint: "http://localhost:8080/jwks",
+							authorizationEndpoint: "http://localhost:8084/authorize",
+							tokenEndpoint: "http://localhost:8084/token",
+							jwksEndpoint: "http://localhost:8084/jwks",
 							discoveryEndpoint:
-								"http://localhost:8080/.well-known/openid-configuration",
+								"http://localhost:8084/.well-known/openid-configuration",
 						},
 					},
 				],
@@ -1544,6 +1972,8 @@ describe("OIDC SSO with defaultSSO array", async () => {
 	// Shared state set during token signing so the userinfo handler knows which client is active
 	let currentEmail = "default-sso-user@default-oidc.com";
 	let currentSub = "default-sso-sub";
+	let currentEmailVerified: boolean | string | undefined = true;
+	let currentIdentityOverride: { email: string; sub: string } | undefined;
 
 	const userinfoHandler = (userInfoResponse: any) => {
 		userInfoResponse.body = {
@@ -1551,7 +1981,7 @@ describe("OIDC SSO with defaultSSO array", async () => {
 			name: "Default SSO User",
 			sub: currentSub,
 			picture: "https://test.com/default.png",
-			email_verified: true,
+			email_verified: currentEmailVerified,
 		};
 		userInfoResponse.statusCode = 200;
 	};
@@ -1559,18 +1989,22 @@ describe("OIDC SSO with defaultSSO array", async () => {
 	const tokenHandler = (token: any) => {
 		const isExplicit = token.payload.aud === "explicit-client";
 		const isNormalized = token.payload.aud === "normalized-client";
-		currentEmail = isNormalized
-			? "default-sso-user@default-oidc-secondary.com"
-			: isExplicit
-				? "default-sso-user@default-oidc-explicit.com"
-				: "default-sso-user@default-oidc.com";
-		currentSub = isNormalized
-			? "normalized-sso-sub"
-			: isExplicit
-				? "explicit-sso-sub"
-				: "default-sso-sub";
+		currentEmail =
+			currentIdentityOverride?.email ??
+			(isNormalized
+				? "default-sso-user@default-oidc-secondary.com"
+				: isExplicit
+					? "default-sso-user@default-oidc-explicit.com"
+					: "default-sso-user@default-oidc.com");
+		currentSub =
+			currentIdentityOverride?.sub ??
+			(isNormalized
+				? "normalized-sso-sub"
+				: isExplicit
+					? "explicit-sso-sub"
+					: "default-sso-sub");
 		token.payload.email = currentEmail;
-		token.payload.email_verified = true;
+		token.payload.email_verified = currentEmailVerified;
 		token.payload.name = "Default SSO User";
 		token.payload.picture = "https://test.com/default.png";
 		token.payload.sub = currentSub;
@@ -1582,7 +2016,7 @@ describe("OIDC SSO with defaultSSO array", async () => {
 		server.service.removeAllListeners("beforeTokenSigning");
 		server.service.on("beforeUserinfo", userinfoHandler);
 		server.service.on("beforeTokenSigning", tokenHandler);
-		await server.start(8080, "localhost");
+		await server.start(8084, "localhost");
 	});
 
 	afterAll(async () => {
@@ -1629,7 +2063,7 @@ describe("OIDC SSO with defaultSSO array", async () => {
 		});
 
 		// Authorization URL must point to the mock IdP resolved via discovery
-		expect(res.url).toContain("http://localhost:8080/authorize");
+		expect(res.url).toContain("http://localhost:8084/authorize");
 		expect(res.url).toContain(
 			"redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fsso%2Fcallback%2Fdefault-oidc-provider",
 		);
@@ -1657,7 +2091,7 @@ describe("OIDC SSO with defaultSSO array", async () => {
 			},
 		});
 
-		expect(res.url).toContain("http://localhost:8080/authorize");
+		expect(res.url).toContain("http://localhost:8084/authorize");
 
 		const { callbackURL } = await simulateOAuthFlow(res.url, headers);
 		expect(callbackURL).toContain("/dashboard");
@@ -1674,7 +2108,7 @@ describe("OIDC SSO with defaultSSO array", async () => {
 			},
 		});
 
-		expect(res.url).toContain("http://localhost:8080/authorize");
+		expect(res.url).toContain("http://localhost:8084/authorize");
 		expect(res.url).toContain(
 			"redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fsso%2Fcallback%2Fdefault-oidc-provider-normalized",
 		);
@@ -1704,7 +2138,7 @@ describe("OIDC SSO with defaultSSO array", async () => {
 			},
 		});
 
-		expect(res.url).toContain("http://localhost:8080/authorize");
+		expect(res.url).toContain("http://localhost:8084/authorize");
 		expect(res.url).toContain(
 			"redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fsso%2Fcallback%2Fdefault-oidc-provider-explicit",
 		);
@@ -1722,6 +2156,42 @@ describe("OIDC SSO with defaultSSO array", async () => {
 			"default-sso-user@default-oidc-explicit.com",
 		);
 	});
+
+	it.each([
+		{ claim: true, expected: true },
+		{ claim: "true", expected: true },
+		{ claim: "false", expected: false },
+		{ claim: undefined, expected: false },
+	])(
+		"keeps configured default OIDC domain trust separate from email_verified=$claim",
+		async ({ claim, expected }) => {
+			currentIdentityOverride = {
+				email: `claim-${String(claim)}@default-oidc.com`,
+				sub: `claim-${String(claim)}`,
+			};
+			currentEmail = currentIdentityOverride.email;
+			currentSub = currentIdentityOverride.sub;
+			currentEmailVerified = claim;
+			const headers = new Headers();
+			const response = await authClient.signIn.sso({
+				providerId: "default-oidc-provider",
+				callbackURL: "/dashboard",
+				fetchOptions: {
+					throw: true,
+					onSuccess: cookieSetter(headers),
+				},
+			});
+			const { callbackURL } = await simulateOAuthFlow(response.url, headers);
+			expect(callbackURL).toContain("/dashboard");
+			const context = await auth.$context;
+			const user = await context.adapter.findOne<{ emailVerified: boolean }>({
+				model: "user",
+				where: [{ field: "email", value: currentEmail }],
+			});
+			expect(user?.emailVerified).toBe(expected);
+			currentIdentityOverride = undefined;
+		},
+	);
 });
 
 describe("OIDC SSO with private_key_jwt", async () => {

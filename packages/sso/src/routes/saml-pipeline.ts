@@ -51,7 +51,9 @@ import {
 } from "../user-resolution";
 import {
 	isSafeSAMLRedirectPath,
+	normalizeSsoAttributes,
 	parseProviderEmailVerified,
+	resolveSSOEmailVerified,
 	safeJsonParse,
 	validateEmailDomain,
 } from "../utils";
@@ -656,6 +658,18 @@ export async function processSAMLResponse(
 			message: "Unable to extract user ID or email from SAML response",
 		});
 	}
+	const providerDomainVerified =
+		"domainVerified" in provider && provider.domainVerified === true;
+	userInfo.emailVerified = resolveSSOEmailVerified({
+		claimVerified: userInfo.emailVerified,
+		trustEmailOwnership:
+			options?.domainVerification?.trustEmailOwnership === true,
+		domainVerificationEnabled: options?.domainVerification?.enabled === true,
+		providerDomainVerified,
+		providerIsPersisted: providerReference.source.type === "persisted",
+		email: userInfo.email,
+		domain: provider.domain,
+	});
 	const providerUserAttributes = Object.fromEntries(
 		Object.entries(userInfo).filter(([key]) => key !== "id"),
 	);
@@ -680,8 +694,7 @@ export async function processSAMLResponse(
 	// from a name match against the global `trustedProviders` list (enforced via
 	// `trustProviderByName: false` below).
 	const isTrustedProvider: boolean =
-		"domainVerified" in provider &&
-		!!(provider as { domainVerified?: boolean }).domainVerified &&
+		providerDomainVerified &&
 		validateEmailDomain(userInfo.email as string, provider.domain);
 
 	const callbackUrl = redirectCandidates.some(Boolean)
@@ -816,6 +829,7 @@ export async function processSAMLResponse(
 		await options.provisionUser({
 			user: user as User & Record<string, any>,
 			userInfo,
+			attributes: normalizeSsoAttributes(attributes),
 			provider,
 		});
 	}

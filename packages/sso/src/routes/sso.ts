@@ -81,7 +81,9 @@ import {
 } from "../user-resolution";
 import {
 	domainMatches,
+	normalizeSsoAttributes,
 	parseProviderEmailVerified,
+	resolveSSOEmailVerified,
 	safeJsonParse,
 	validateEmailDomain,
 } from "../utils";
@@ -1650,6 +1652,18 @@ async function handleOIDCCallback(
 	if (!userInfo.email || !userInfo.id) {
 		return redirectOIDCError("invalid_provider", "missing_user_info");
 	}
+	const providerDomainVerified =
+		"domainVerified" in provider && provider.domainVerified === true;
+	userInfo.emailVerified = resolveSSOEmailVerified({
+		claimVerified: userInfo.emailVerified === true,
+		trustEmailOwnership:
+			options?.domainVerification?.trustEmailOwnership === true,
+		domainVerificationEnabled: options?.domainVerification?.enabled === true,
+		providerDomainVerified,
+		providerIsPersisted: acceptedProviderReference.source.type === "persisted",
+		email: userInfo.email,
+		domain: provider.domain,
+	});
 	const userInfoEmail = userInfo.email;
 	const userInfoId = userInfo.id;
 	const providerUserAttributes = Object.fromEntries(
@@ -1660,9 +1674,7 @@ async function handleOIDCCallback(
 		email: userInfoEmail,
 		name: typeof userInfo.name === "string" ? userInfo.name : "",
 		image: typeof userInfo.image === "string" ? userInfo.image : undefined,
-		emailVerified: options?.trustEmailVerified
-			? userInfo.emailVerified === true
-			: false,
+		emailVerified: userInfo.emailVerified === true,
 	};
 	const accountKey = {
 		issuer:
@@ -1671,8 +1683,7 @@ async function handleOIDCCallback(
 		accountId: userInfoId,
 	};
 	const isTrustedProvider =
-		"domainVerified" in provider &&
-		(provider as { domainVerified?: boolean }).domainVerified === true &&
+		providerDomainVerified &&
 		validateEmailDomain(userInfoEmail, provider.domain);
 
 	let linked: Awaited<ReturnType<typeof handleOAuthUserInfo>>;
@@ -1806,6 +1817,7 @@ async function handleOIDCCallback(
 		await options.provisionUser({
 			user,
 			userInfo,
+			attributes: normalizeSsoAttributes(rawProfile ?? userInfo),
 			token: tokenResponse,
 			provider,
 		});
@@ -1819,7 +1831,7 @@ async function handleOIDCCallback(
 			accountId: userInfoId,
 			email: userInfoEmail,
 			emailVerified: Boolean(userInfo.emailVerified),
-			rawAttributes: userInfo,
+			rawAttributes: rawProfile ?? userInfo,
 		},
 		provider,
 		token: tokenResponse,

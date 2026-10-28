@@ -12,6 +12,9 @@ import type {
 } from "better-auth/db";
 import type { AlgorithmValidationOptions } from "./saml/algorithms";
 
+/** SSO provider attributes converted to trimmed string values. */
+export type NormalizedSSOAttributes = Record<string, string | string[]>;
+
 /**
  * The organization row passed to `organizationProvisioning.getMemberData`.
  * Deliberately narrow — only the fields every organization plugin
@@ -443,7 +446,9 @@ export interface SSOOptions {
 		  ) => Awaitable<void>)
 		| undefined;
 	/**
-	 * custom function to provision a user when they sign in with an SSO provider.
+	 * Custom function to provision a user when they sign in with an SSO provider.
+	 * `attributes` contains normalized provider claims; `userInfo` remains the
+	 * protocol-specific user profile.
 	 */
 	provisionUser?:
 		| ((data: {
@@ -455,6 +460,8 @@ export interface SSOOptions {
 				 * The user info object from the provider
 				 */
 				userInfo: Record<string, any>;
+				/** Normalized values from the raw OIDC claims or SAML attributes. */
+				attributes: NormalizedSSOAttributes;
 				/**
 				 * The OAuth2 tokens from the provider
 				 */
@@ -491,6 +498,8 @@ export interface SSOOptions {
 					 * The user info object from the provider
 					 */
 					userInfo: Record<string, any>;
+					/** Normalized values from the raw OIDC claims or SAML attributes. */
+					attributes: NormalizedSSOAttributes;
 					/**
 					 * The OAuth2 tokens from the provider
 					 */
@@ -532,6 +541,8 @@ export interface SSOOptions {
 					 * callback.
 					 */
 					userInfo: Record<string, any>;
+					/** Normalized values from the raw OIDC claims or SAML attributes. */
+					attributes: NormalizedSSOAttributes;
 					/**
 					 * The OAuth2 tokens from the provider (OIDC only)
 					 */
@@ -692,6 +703,12 @@ export interface SSOOptions {
 		 * Enables or disables the domain verification feature
 		 */
 		enabled?: boolean;
+		/**
+		 * Treat a provider-matching email as verified when the persisted provider
+		 * domain has been verified. Requires `enabled: true` and defaults to false.
+		 * This does not bypass local account-linking verification requirements.
+		 */
+		trustEmailOwnership?: boolean;
 		/**
 		 * Prefix used to generate the domain verification token.
 		 * An underscore is automatically prepended to follow DNS

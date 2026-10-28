@@ -417,7 +417,8 @@ const createTemplateCallback =
 			AuthnStatement: "",
 			attrFirstName: "Test",
 			attrLastName: "User",
-			attrEmail: "test@email.com",
+			attrEmail: email,
+			attrEmailVerified: "true",
 		};
 
 		return {
@@ -471,6 +472,8 @@ interface MockIdPOptions {
 	wantAuthnRequestsSigned?: boolean;
 	spSigningKey?: string;
 	spSigningKeyPass?: string;
+	emailVerifiedClaim?: boolean;
+	email?: string;
 }
 
 interface MockSAMLResponse {
@@ -514,6 +517,16 @@ const createMockSAMLIdP = (port: number, options: MockIdPOptions = {}) => {
 					nameFormat: "urn:oasis:names:tc:SAML:2.0:attrname-format:basic",
 					valueXsiType: "xs:string",
 				},
+				...(options.emailVerifiedClaim
+					? [
+							{
+								name: "email_verified",
+								valueTag: "emailVerified",
+								nameFormat: "urn:oasis:names:tc:SAML:2.0:attrname-format:basic",
+								valueXsiType: "xs:string",
+							},
+						]
+					: []),
 			],
 		},
 	});
@@ -559,7 +572,8 @@ const createMockSAMLIdP = (port: number, options: MockIdPOptions = {}) => {
 
 			const emailCase = req.query.emailCase as string;
 			const emailValue =
-				emailCase === "mixed" ? "TestUser@Example.com" : "test@email.com";
+				options.email ??
+				(emailCase === "mixed" ? "TestUser@Example.com" : "test@email.com");
 			const user = {
 				email: emailValue,
 				emailAddress: emailValue,
@@ -719,7 +733,7 @@ describe("SAML SSO with defaultSSO array", async () => {
 	const ssoOptions = {
 		defaultSSO: [
 			{
-				domain: "localhost:8081",
+				domain: "email.com",
 				providerId: "default-saml",
 				samlConfig: {
 					issuer: "http://localhost:8081",
@@ -736,19 +750,13 @@ describe("SAML SSO with defaultSSO array", async () => {
 					},
 					identifierFormat:
 						"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+					mapping: { emailVerified: "email_verified" },
 				},
 			},
 		],
-		provisionUser: vi
-			.fn()
-			.mockImplementation(async ({ user, userInfo, token, provider }) => {
-				return {
-					id: "provisioned-user-id",
-					email: userInfo.email,
-					name: userInfo.name,
-					attributes: userInfo.attributes,
-				};
-			}),
+		trustEmailVerified: true,
+		domainVerification: { enabled: true, trustEmailOwnership: true },
+		provisionUser: vi.fn(),
 	};
 
 	const auth = betterAuth({
@@ -795,6 +803,52 @@ describe("SAML SSO with defaultSSO array", async () => {
 		const spMetadataResValue = await spMetadataRes.text();
 		expect(spMetadataRes.status).toBe(200);
 		expect(spMetadataResValue).toBe(spMetadata);
+	});
+
+	it("does not promote the email claim for a configured default SAML provider", async () => {
+		const provisionUser = ssoOptions.provisionUser;
+		provisionUser.mockClear();
+		const initiation = await auth.api.signInSSO({
+			body: {
+				providerId: "default-saml",
+				callbackURL: "http://localhost:3000/dashboard",
+			},
+			returnHeaders: true,
+		});
+		let samlResponse: string | undefined;
+		await betterFetch(initiation.response?.url ?? "", {
+			onSuccess: async (context) => {
+				const responseData: unknown = await context.data;
+				if (
+					typeof responseData === "object" &&
+					responseData !== null &&
+					"samlResponse" in responseData &&
+					typeof responseData.samlResponse === "string"
+				) {
+					samlResponse = responseData.samlResponse;
+				}
+			},
+		});
+		if (!samlResponse) throw new Error("Expected a SAML response from the IdP");
+		const relayState = new URL(initiation.response?.url ?? "").searchParams.get(
+			"RelayState",
+		);
+		const callback = await auth.api.acsEndpoint({
+			method: "POST",
+			body: { SAMLResponse: samlResponse, RelayState: relayState ?? "" },
+			headers: { Cookie: initiation.headers.get("set-cookie") ?? "" },
+			params: { providerId: "default-saml" },
+			asResponse: true,
+		});
+		expect(callback.headers.get("location")).toContain("/dashboard");
+		expect(provisionUser).toHaveBeenCalledTimes(1);
+		expect(provisionUser.mock.calls[0]?.[0].user.emailVerified).toBe(false);
+		const context = await auth.$context;
+		const user = await context.adapter.findOne<{ emailVerified: boolean }>({
+			model: "user",
+			where: [{ field: "email", value: "test@email.com" }],
+		});
+		expect(user?.emailVerified).toBe(false);
 	});
 });
 
@@ -6226,6 +6280,10 @@ describe("SAML Single Logout (SLO)", () => {
 describe("SAML provisionUser should only be called for new users", async () => {
 	const provisionUserFn = vi.fn();
 	const validateUserInfoFn = vi.fn();
+	const mappedClaimsMockIdP = createMockSAMLIdP(8085, {
+		emailVerifiedClaim: true,
+		email: "mapped-claim@outside.example",
+	});
 	const { auth, signInWithTestUser } = await getTestInstance({
 		user: {
 			validateUserInfo({ source }) {
@@ -6237,9 +6295,139 @@ describe("SAML provisionUser should only be called for new users", async () => {
 		plugins: [
 			sso({
 				provisionUser: provisionUserFn,
+				trustEmailVerified: true,
+				domainVerification: {
+					enabled: true,
+					trustEmailOwnership: true,
+				},
 				saml: { enableInResponseToValidation: false },
 			}),
 		],
+	});
+	beforeAll(async () => {
+		await mappedClaimsMockIdP.start();
+	});
+	afterAll(async () => {
+		await mappedClaimsMockIdP.stop();
+	});
+
+	async function ensurePersistedSAMLProvider(
+		headers: Headers,
+		providerId: string,
+		domainVerified = true,
+	) {
+		const context = await auth.$context;
+		const existing = await context.adapter.findOne({
+			model: "ssoProvider",
+			where: [{ field: "providerId", value: providerId }],
+		});
+		if (!existing) {
+			await auth.api.registerSSOProvider({
+				body: {
+					providerId,
+					issuer: "http://localhost:8081",
+					domain: "email.com",
+					samlConfig: {
+						entryPoint: "http://localhost:8081/api/sso/saml2/idp/post",
+						cert: certificate,
+						wantAssertionsSigned: false,
+						signatureAlgorithm: "sha256",
+						digestAlgorithm: "sha256",
+						idpMetadata: { metadata: idpMetadata },
+						spMetadata: { metadata: spMetadata },
+						identifierFormat:
+							"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+					},
+				},
+				headers,
+			});
+		}
+		await context.adapter.update({
+			model: "ssoProvider",
+			where: [{ field: "providerId", value: providerId }],
+			update: { domainVerified },
+		});
+	}
+
+	it("accepts mapped email_verified claims from a persisted SAML provider", async () => {
+		const { headers } = await signInWithTestUser();
+		await auth.api.registerSSOProvider({
+			body: {
+				providerId: "saml-mapped-claim",
+				issuer: "http://localhost:8081/api/sso/saml2/idp/metadata",
+				domain: "different.example",
+				samlConfig: {
+					entryPoint: "http://localhost:8085/api/sso/saml2/idp/post",
+					cert: extractSigningCertificateFromMetadata(idpMetadata),
+					wantAssertionsSigned: false,
+					signatureAlgorithm: "sha256",
+					digestAlgorithm: "sha256",
+					idpMetadata: {
+						entityID: "http://localhost:8081/api/sso/saml2/idp/metadata",
+					},
+					spMetadata: { metadata: spMetadata },
+					identifierFormat:
+						"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+					mapping: {
+						email: "email",
+						emailVerified: "email_verified",
+					},
+				},
+			},
+			headers,
+		});
+		const context = await auth.$context;
+		await context.adapter.update({
+			model: "ssoProvider",
+			where: [{ field: "providerId", value: "saml-mapped-claim" }],
+			update: { domainVerified: true },
+		});
+		provisionUserFn.mockClear();
+
+		const initiation = await auth.api.signInSSO({
+			body: {
+				providerId: "saml-mapped-claim",
+				callbackURL: "http://localhost:3000/dashboard",
+			},
+			returnHeaders: true,
+		});
+		let samlResponse: string | undefined;
+		await betterFetch(initiation.response?.url ?? "", {
+			onSuccess: async (responseContext) => {
+				const responseData: unknown = await responseContext.data;
+				if (
+					typeof responseData === "object" &&
+					responseData !== null &&
+					"samlResponse" in responseData &&
+					typeof responseData.samlResponse === "string"
+				) {
+					samlResponse = responseData.samlResponse;
+				}
+			},
+		});
+		if (!samlResponse) throw new Error("Expected a SAML response from the IdP");
+		const relayState = new URL(initiation.response?.url ?? "").searchParams.get(
+			"RelayState",
+		);
+		const callback = await auth.api.acsEndpoint({
+			method: "POST",
+			body: { SAMLResponse: samlResponse, RelayState: relayState ?? "" },
+			headers: { Cookie: initiation.headers.get("set-cookie") ?? "" },
+			params: { providerId: "saml-mapped-claim" },
+			asResponse: true,
+		});
+		expect(callback.headers.get("location")).toContain("/dashboard");
+		expect(provisionUserFn.mock.calls[0]?.[0].attributes).toMatchObject({
+			email: "mapped-claim@outside.example",
+			email_verified: "true",
+		});
+		expect(provisionUserFn.mock.calls[0]?.[0].user.emailVerified).toBe(true);
+		expect(
+			await context.adapter.findOne<{ emailVerified: boolean }>({
+				model: "user",
+				where: [{ field: "email", value: "mapped-claim@outside.example" }],
+			}),
+		).toMatchObject({ emailVerified: true });
 	});
 
 	it("should call provisionUser only on first sign-in (new user), not on subsequent sign-ins", async () => {
@@ -6248,7 +6436,7 @@ describe("SAML provisionUser should only be called for new users", async () => {
 			body: {
 				providerId: "saml-provision-test",
 				issuer: "http://localhost:8081",
-				domain: "http://localhost:8081",
+				domain: "email.com",
 				samlConfig: {
 					entryPoint: "http://localhost:8081/api/sso/saml2/idp/post",
 					cert: certificate,
@@ -6266,6 +6454,12 @@ describe("SAML provisionUser should only be called for new users", async () => {
 				},
 			},
 			headers,
+		});
+		const context = await auth.$context;
+		await context.adapter.update({
+			model: "ssoProvider",
+			where: [{ field: "providerId", value: "saml-provision-test" }],
+			update: { domainVerified: true },
 		});
 
 		provisionUserFn.mockClear();
@@ -6304,6 +6498,18 @@ describe("SAML provisionUser should only be called for new users", async () => {
 		});
 
 		expect(provisionUserFn).toHaveBeenCalledTimes(1);
+		expect(provisionUserFn.mock.calls[0]?.[0].user.emailVerified).toBe(true);
+		expect(provisionUserFn.mock.calls[0]?.[0].attributes).toEqual({
+			firstName: "Test",
+			lastName: "User",
+			email: "test@email.com",
+		});
+		expect(
+			await context.adapter.findOne<{ emailVerified: boolean }>({
+				model: "user",
+				where: [{ field: "email", value: "test@email.com" }],
+			}),
+		).toMatchObject({ emailVerified: true });
 		expect(validateUserInfoFn).toHaveBeenCalledTimes(1);
 		expect(validateUserInfoFn.mock.calls[0]?.[0]).toMatchObject({
 			action: "create-user",
@@ -6360,6 +6566,168 @@ describe("SAML provisionUser should only be called for new users", async () => {
 		});
 		expect(validateUserInfoFn.mock.calls[1]?.[0].sso?.profile).toBeDefined();
 		expect(validateUserInfoFn.mock.calls[1]?.[0].oauth).toBeUndefined();
+	});
+
+	it("does not let domain-based email trust bypass local account verification", async () => {
+		const { headers } = await signInWithTestUser();
+		await ensurePersistedSAMLProvider(headers, "saml-provision-test");
+		const context = await auth.$context;
+		let user = await context.adapter.findOne<User>({
+			model: "user",
+			where: [{ field: "email", value: "test@email.com" }],
+		});
+		if (!user) {
+			const signup = await auth.api.signUpEmail({
+				body: {
+					email: "test@email.com",
+					password: "test-password-123",
+					name: "Test User",
+				},
+			});
+			user = signup.user;
+		}
+		const originalName = user.name;
+		const account = await context.adapter.findOne<{ id: string }>({
+			model: "account",
+			where: [
+				{ field: "providerId", value: "saml-provision-test" },
+				{ field: "accountId", value: "test@email.com" },
+			],
+		});
+		if (account) {
+			await context.adapter.delete({
+				model: "account",
+				where: [{ field: "id", value: account.id }],
+			});
+		}
+		await context.adapter.update({
+			model: "user",
+			where: [{ field: "id", value: user.id }],
+			update: { emailVerified: false },
+		});
+		const sessionsBefore = await context.adapter.findMany({
+			model: "session",
+			where: [{ field: "userId", value: user.id }],
+		});
+		provisionUserFn.mockClear();
+
+		const submitSAMLAssertion = async () => {
+			const initiation = await auth.api.signInSSO({
+				body: {
+					providerId: "saml-provision-test",
+					callbackURL: "http://localhost:3000/dashboard",
+				},
+				returnHeaders: true,
+			});
+			let samlResponse: string | undefined;
+			await betterFetch(initiation.response?.url, {
+				onSuccess: async (responseContext) => {
+					const responseData: unknown = await responseContext.data;
+					if (
+						typeof responseData === "object" &&
+						responseData !== null &&
+						"samlResponse" in responseData &&
+						typeof responseData.samlResponse === "string"
+					) {
+						samlResponse = responseData.samlResponse;
+					}
+				},
+			});
+			if (!samlResponse) throw new Error("Expected an IdP SAML response");
+			const relayState = new URL(
+				initiation.response?.url ?? "",
+			).searchParams.get("RelayState");
+			return auth.api.acsEndpoint({
+				method: "POST",
+				body: { SAMLResponse: samlResponse, RelayState: relayState ?? "" },
+				headers: {
+					Cookie: initiation.headers.get("set-cookie") ?? "",
+				},
+				params: { providerId: "saml-provision-test" },
+				asResponse: true,
+			});
+		};
+
+		const rejected = await submitSAMLAssertion();
+		expect(rejected.headers.get("location")).toContain("account_not_linked");
+		expect(
+			await context.adapter.findOne({
+				model: "account",
+				where: [
+					{ field: "providerId", value: "saml-provision-test" },
+					{ field: "accountId", value: "test@email.com" },
+				],
+			}),
+		).toBeNull();
+		expect(
+			await context.adapter.findOne<User>({
+				model: "user",
+				where: [{ field: "id", value: user.id }],
+			}),
+		).toMatchObject({ emailVerified: false, name: originalName });
+		expect(
+			await context.adapter.findMany({
+				model: "session",
+				where: [{ field: "userId", value: user.id }],
+			}),
+		).toHaveLength(sessionsBefore.length);
+		expect(provisionUserFn).not.toHaveBeenCalled();
+		await context.adapter.update({
+			model: "user",
+			where: [{ field: "id", value: user.id }],
+			update: { emailVerified: true },
+		});
+		const accepted = await submitSAMLAssertion();
+		expect(accepted.headers.get("location")).toContain("/dashboard");
+		expect(
+			await context.adapter.findOne({
+				model: "account",
+				where: [
+					{ field: "providerId", value: "saml-provision-test" },
+					{ field: "accountId", value: "test@email.com" },
+				],
+			}),
+		).not.toBeNull();
+		const persistedUser = await context.adapter.findOne<User>({
+			model: "user",
+			where: [{ field: "id", value: user.id }],
+		});
+		expect(persistedUser?.emailVerified).toBe(true);
+	});
+
+	it("rejects an unverified persisted SAML domain before writing authentication data", async () => {
+		const { headers } = await signInWithTestUser();
+		await ensurePersistedSAMLProvider(
+			headers,
+			"saml-unverified-domain-provider",
+			false,
+		);
+		const context = await auth.$context;
+		const before = {
+			users: await context.adapter.findMany({ model: "user" }),
+			accounts: await context.adapter.findMany({ model: "account" }),
+			sessions: await context.adapter.findMany({ model: "session" }),
+		};
+		provisionUserFn.mockClear();
+
+		await expect(
+			auth.api.signInSSO({
+				body: {
+					providerId: "saml-unverified-domain-provider",
+					callbackURL: "http://localhost:3000/dashboard",
+				},
+			}),
+		).rejects.toThrow(/Provider domain has not been verified/);
+		expect(await context.adapter.findMany({ model: "user" })).toHaveLength(
+			before.users.length,
+		);
+		expect(await context.adapter.findMany({ model: "account" })).toHaveLength(
+			before.accounts.length,
+		);
+		expect(await context.adapter.findMany({ model: "session" })).toHaveLength(
+			before.sessions.length,
+		);
+		expect(provisionUserFn).not.toHaveBeenCalled();
 	});
 });
 
@@ -6439,6 +6807,7 @@ describe("SAML provisionUserOnEveryLogin should call provisionUser on every sign
 		});
 
 		expect(provisionUserFn).toHaveBeenCalledTimes(1);
+		expect(provisionUserFn.mock.calls[0]?.[0].user.emailVerified).toBe(false);
 
 		provisionUserFn.mockClear();
 

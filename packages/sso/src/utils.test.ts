@@ -1,10 +1,108 @@
 import { describe, expect, it } from "vitest";
 import {
 	domainMatches,
+	normalizeSsoAttributes,
 	parseProviderDomains,
 	parseProviderEmailVerified,
+	resolveSSOEmailVerified,
 	validateEmailDomain,
 } from "./utils";
+
+describe("normalizeSsoAttributes", () => {
+	it("normalizes scalar and multi-valued protocol claims", () => {
+		expect(
+			normalizeSsoAttributes({
+				name: "  Alice Example  ",
+				empty: " \t ",
+				active: true,
+				level: 3,
+				groups: [" admin ", "", 2, false, null, {}, ["nested"]],
+				missing: null,
+				object: { nested: "value" },
+				list: [],
+			}),
+		).toEqual({
+			name: "Alice Example",
+			active: "true",
+			level: "3",
+			groups: ["admin", "2", "false"],
+		});
+	});
+
+	it("returns empty attributes for non-object input", () => {
+		for (const input of [undefined, null, "claim", 3, true, [], ["claim"]]) {
+			expect(normalizeSsoAttributes(input)).toEqual({});
+		}
+	});
+});
+
+describe("resolveSSOEmailVerified", () => {
+	it("preserves the existing upstream-claim trust gate by default", () => {
+		expect(
+			resolveSSOEmailVerified({
+				claimVerified: true,
+				trustEmailOwnership: false,
+				domainVerificationEnabled: true,
+				providerDomainVerified: true,
+				providerIsPersisted: false,
+				email: "alice@example.com",
+				domain: "example.com",
+			}),
+		).toBe(true);
+		expect(
+			resolveSSOEmailVerified({
+				claimVerified: false,
+				trustEmailOwnership: false,
+				domainVerificationEnabled: true,
+				providerDomainVerified: true,
+				providerIsPersisted: true,
+				email: "alice@example.com",
+				domain: "example.com",
+			}),
+		).toBe(false);
+	});
+
+	it("trusts an email only when the opt-in, enabled verification, and verified matching provider all agree", () => {
+		const input = {
+			claimVerified: false,
+			trustEmailOwnership: true,
+			domainVerificationEnabled: true,
+			providerDomainVerified: true,
+			providerIsPersisted: true,
+			email: "alice@dept.example.com",
+			domain: "example.com",
+		};
+		expect(resolveSSOEmailVerified(input)).toBe(true);
+		expect(
+			resolveSSOEmailVerified({ ...input, email: "alice@notexample.com" }),
+		).toBe(false);
+		expect(
+			resolveSSOEmailVerified({ ...input, providerDomainVerified: false }),
+		).toBe(false);
+		expect(
+			resolveSSOEmailVerified({ ...input, providerIsPersisted: false }),
+		).toBe(false);
+		expect(
+			resolveSSOEmailVerified({ ...input, domainVerificationEnabled: false }),
+		).toBe(false);
+	});
+
+	it("does not promote claims when domain verification is disabled or the provider is unverified", () => {
+		const input = {
+			claimVerified: false,
+			trustEmailOwnership: true,
+			domainVerificationEnabled: true,
+			providerDomainVerified: false,
+			providerIsPersisted: true,
+			email: "alice@example.com",
+			domain: "example.com",
+		};
+		expect(resolveSSOEmailVerified(input)).toBe(false);
+		expect(
+			resolveSSOEmailVerified({ ...input, domainVerificationEnabled: false }),
+		).toBe(false);
+	});
+});
 
 describe("parseProviderEmailVerified", () => {
 	it('treats only boolean true and the string "true" as verified', () => {
