@@ -51,6 +51,7 @@ export {
 
 import type {
 	InferSSOProvider,
+	NormalizedSSOAttributes,
 	OIDCConfig,
 	Organization,
 	SAMLConfig,
@@ -71,6 +72,7 @@ import type {
 import { PACKAGE_VERSION } from "./version";
 
 export type {
+	NormalizedSSOAttributes,
 	OIDCConfig,
 	Organization,
 	SAMLConfig,

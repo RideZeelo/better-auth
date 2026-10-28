@@ -29,6 +29,8 @@ const createTestContext = (domainVerificationEnabled = true) => {
 			userId: string;
 			role: string;
 			createdAt: Date;
+			customField?: string;
+			memberDepartment?: string;
 		}[],
 		invitation: [] as {
 			id: string;
@@ -65,7 +67,16 @@ const createTestContext = (domainVerificationEnabled = true) => {
 						}
 					: {},
 			),
-			organization(),
+			organization({
+				schema: {
+					member: {
+						additionalFields: {
+							customField: { type: "string", required: false },
+							memberDepartment: { type: "string", required: false },
+						},
+					},
+				},
+			}),
 		],
 	});
 
@@ -664,7 +675,7 @@ describe("assignOrganizationByDomain", () => {
 		).rejects.toThrow("provider lookup failed");
 	});
 
-	it("should use getMemberData hook to add additional fields to member", async () => {
+	it("passes empty attributes to domain-only provisioning hooks", async () => {
 		const { data, createContext } = createTestContext();
 
 		const org = createOrg();
@@ -676,16 +687,23 @@ describe("assignOrganizationByDomain", () => {
 		const user = createUser({ name: "Alice Smith" });
 		data.user.push(user);
 
+		const getRoleSpy = vi.fn(async () => "member");
 		const getMemberDataSpy = vi.fn(
 			async ({
 				user,
+				userInfo,
+				attributes,
 				organization,
 				defaultData,
 			}: {
 				user: User & Record<string, any>;
 				organization: Record<string, any>;
 				defaultData: Record<string, any>;
+				userInfo: Record<string, unknown>;
+				attributes: Record<string, string | string[]>;
 			}) => {
+				expect(userInfo).toEqual({});
+				expect(attributes).toEqual({});
 				return {
 					...defaultData,
 					customField: "custom-value",
@@ -700,11 +718,15 @@ describe("assignOrganizationByDomain", () => {
 			user,
 			domainVerification: { enabled: true },
 			provisioningOptions: {
+				getRole: getRoleSpy,
 				getMemberData: getMemberDataSpy,
 			},
 		});
 
 		expect(getMemberDataSpy).toHaveBeenCalledTimes(1);
+		expect(getRoleSpy).toHaveBeenCalledWith(
+			expect.objectContaining({ userInfo: {}, attributes: {} }),
+		);
 		const callArgs = getMemberDataSpy.mock.calls[0]?.[0];
 		expect(callArgs?.user.id).toBe(user.id);
 		expect(callArgs?.user.name).toBe("Alice Smith");
@@ -718,7 +740,6 @@ describe("assignOrganizationByDomain", () => {
 		expect(members).toHaveLength(1);
 		expect(members[0]?.organizationId).toBe(org.id);
 	});
-
 	it("should use default data when getMemberData returns undefined", async () => {
 		const { data, createContext } = createTestContext();
 
@@ -842,19 +863,35 @@ describe("assignOrganizationFromProvider", () => {
 		data.organization.push(organizationRecord);
 		data.ssoProvider.push(provider);
 
+		const rawAttributes = { department: " Engineering " };
+		const getRoleSpy = vi.fn(
+			async ({
+				attributes,
+			}: {
+				attributes: Record<string, string | string[]>;
+			}) => (attributes.department === "Engineering" ? "admin" : "member"),
+		);
 		const getMemberDataSpy = vi.fn(
 			async ({
 				userInfo,
+				attributes,
 				organization,
 				defaultData,
 			}: {
-				userInfo: Record<string, any>;
-				organization: Record<string, any>;
-				defaultData: Record<string, any>;
+				userInfo: Record<string, unknown>;
+				attributes: Record<string, string | string[]>;
+				organization: { id: string; name: string };
+				defaultData: {
+					organizationId: string;
+					userId: string;
+					role: string;
+					createdAt: Date;
+				};
 			}) => {
 				return {
 					...defaultData,
 					department: userInfo.department,
+					memberDepartment: attributes.department,
 					organizationName: organization.name,
 				};
 			},
@@ -870,22 +907,33 @@ describe("assignOrganizationFromProvider", () => {
 				accountId: "enterprise-account",
 				email: user.email,
 				emailVerified: true,
-				rawAttributes: { department: "Engineering" },
+				rawAttributes,
 			},
 			provisioningOptions: {
+				getRole: getRoleSpy,
 				getMemberData: getMemberDataSpy,
 			},
 		});
 
 		expect(getMemberDataSpy).toHaveBeenCalledTimes(1);
+		const normalizedAttributes = { department: "Engineering" };
+		expect(getRoleSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				userInfo: rawAttributes,
+				attributes: normalizedAttributes,
+			}),
+		);
 		const callArgs = getMemberDataSpy.mock.calls[0]?.[0];
-		expect(callArgs?.userInfo.department).toBe("Engineering");
+		expect(callArgs?.userInfo).toEqual(rawAttributes);
+		expect(callArgs?.attributes).toEqual(normalizedAttributes);
 		expect(callArgs?.organization.id).toBe(organizationRecord.id);
 
 		expect(data.member).toHaveLength(1);
 		expect(data.member[0]).toMatchObject({
 			organizationId: organizationRecord.id,
 			userId: user.id,
+			role: "admin",
+			memberDepartment: "Engineering",
 		});
 	});
 });

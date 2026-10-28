@@ -1,5 +1,6 @@
 import { X509Certificate } from "node:crypto";
 import { getHostname } from "tldts";
+import type { NormalizedSSOAttributes } from "./types";
 
 const unsafeSAMLRedirectPathPrefix = /^\/(?:\/|\\|%2f|%5c)/i;
 
@@ -74,6 +75,60 @@ export const validateEmailDomain = (email: string, domain: string) => {
 	}
 	return domainMatches(emailDomain, domain);
 };
+
+export function normalizeSsoAttributes(
+	input: unknown,
+): NormalizedSSOAttributes {
+	if (typeof input !== "object" || input === null || Array.isArray(input)) {
+		return {};
+	}
+
+	const normalizedAttributes: NormalizedSSOAttributes = {};
+	const entries: [string, unknown][] = Object.entries(input);
+	for (const [key, value] of entries) {
+		if (key === "__proto__") {
+			continue;
+		}
+		if (typeof value === "string") {
+			const normalized = value.trim();
+			if (normalized) normalizedAttributes[key] = normalized;
+		} else if (typeof value === "number" || typeof value === "boolean") {
+			normalizedAttributes[key] = String(value);
+		} else if (Array.isArray(value)) {
+			const values: unknown[] = value;
+			const normalized = values.flatMap((entry) => {
+				if (typeof entry === "string") {
+					const trimmed = entry.trim();
+					return trimmed ? [trimmed] : [];
+				}
+				return typeof entry === "number" || typeof entry === "boolean"
+					? [String(entry)]
+					: [];
+			});
+			if (normalized.length > 0) normalizedAttributes[key] = normalized;
+		}
+	}
+	return normalizedAttributes;
+}
+
+export function resolveSSOEmailVerified(input: {
+	claimVerified: boolean;
+	trustEmailOwnership: boolean;
+	domainVerificationEnabled: boolean;
+	providerDomainVerified: boolean;
+	providerIsPersisted: boolean;
+	email: string;
+	domain: string;
+}): boolean {
+	return (
+		input.claimVerified ||
+		(input.trustEmailOwnership &&
+			input.domainVerificationEnabled &&
+			input.providerDomainVerified &&
+			input.providerIsPersisted &&
+			validateEmailDomain(input.email, input.domain))
+	);
+}
 
 export function parseCertificate(certPem: string) {
 	// SAML metadata X509Certificate elements contain raw base64 without PEM headers,

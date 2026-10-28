@@ -1416,6 +1416,15 @@ The provider ID is stored in the OAuth state so the callback can identify which 
 Domain verification allows your application to trust a new SSO provider after
 validating ownership of every associated domain.
 
+Provider domain verification does not mark the SSO email as verified by default.
+To opt in, set `domainVerification.trustEmailOwnership: true` on the server.
+This only promotes the email when domain verification is enabled, the persisted
+provider domain is verified, and the mapped sign-in email matches that domain.
+For a matching email, this verified-domain authority overrides a false or absent
+provider `email_verified` claim. It applies only to persisted SSO providers, not
+inline `defaultSSO` providers, and does not bypass local account-linking
+verification requirements.
+
 When a provider's domain is verified, it is also trusted for **automatic account linking**. This means that if a user signs in with an SSO provider (OIDC or SAML) and an existing account with the same email exists, the accounts will be linked automatically — as long as the user's email domain matches the provider's verified domain.
 
 Domain verification is also required for automatic organization assignment
@@ -1447,7 +1456,8 @@ organization only when the verified domain maps to exactly one.
         plugins: [
             sso({ // [!code highlight]
                 domainVerification: { // [!code highlight]
-                    enabled: true // [!code highlight]
+                    enabled: true, // [!code highlight]
+                    trustEmailOwnership: true // [!code highlight]
                 } // [!code highlight]
             }) // [!code highlight]
         ]
@@ -1743,6 +1753,13 @@ For a detailed guide on setting up SAML SSO with examples for Okta and testing w
 
 **organizationProvisioning**: Options for provisioning users to an organization.
 
+The `provisionUser`, `organizationProvisioning.getRole`, and
+`organizationProvisioning.getMemberData` callbacks receive `attributes` with
+trimmed string values from the raw OIDC claims or SAML attributes. Scalar
+numbers and booleans become strings; multi-valued attributes remain arrays of
+strings. The existing `userInfo` value remains available, and domain-only
+organization provisioning receives empty `attributes` and `userInfo` objects.
+
 **defaultOverrideUserInfo**: Override user info with the provider info by default.
 
 **disableImplicitSignUp**: Disable implicit sign up for new users.
@@ -1814,6 +1831,12 @@ export const ssoOptionsType = {
 				type: "string",
 				required: false,
 				default: "better-auth-token",
+			},
+			trustEmailOwnership: {
+				description: "Treat provider-matching email as verified only when domain verification is enabled and the persisted provider domain is verified. Does not bypass local account-linking verification requirements.",
+				type: "boolean",
+				required: false,
+				default: false,
 			},
 		},
 	},
