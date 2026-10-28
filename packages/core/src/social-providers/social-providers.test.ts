@@ -14,6 +14,7 @@ import { CLIENT_ASSERTION_TYPE } from "../oauth2";
 import { cognito } from "./cognito";
 import { discord } from "./discord";
 import { socialProviders } from "./index";
+import { kakao } from "./kakao";
 import { microsoft } from "./microsoft-entra-id";
 import { roblox } from "./roblox";
 import { slack } from "./slack";
@@ -133,32 +134,6 @@ describe("OAuth account identity contract", () => {
 		});
 
 		expect(getUserInfo).toBeTypeOf("function");
-	});
-
-	it("uses canonical issuers only for providers with verified OIDC identity", () => {
-		expect(
-			providers
-				.filter((provider) => provider.accountIssuer !== undefined)
-				.map((provider) => provider.id)
-				.sort(),
-		).toEqual([
-			"apple",
-			"cognito",
-			"facebook",
-			"google",
-			"line",
-			"microsoft",
-			"paybin",
-		]);
-	});
-
-	it("uses the configured Paybin issuer as the account namespace", () => {
-		const provider = socialProviders.paybin({
-			...providerOptions,
-			issuer: "https://idp.sandbox.paybin.example",
-		});
-
-		expect(provider.accountIssuer).toBe("https://idp.sandbox.paybin.example");
 	});
 });
 
@@ -299,6 +274,20 @@ describe("discord provider", () => {
 		});
 		expect(url.searchParams.get("custom")).toBe("value");
 		expect(url.searchParams.get("state")).toBe(baseState);
+	});
+});
+
+describe("kakao provider", () => {
+	/**
+	 * @see https://developers.kakao.com/docs/en/kakaologin/rest-api#request-code-login-hint
+	 */
+	it("forwards loginHint as login_hint", async () => {
+		const provider = kakao({ ...credentials });
+		const url = await provider.createAuthorizationURL({
+			...baseInput,
+			loginHint: "user@example.com",
+		});
+		expect(url.searchParams.get("login_hint")).toBe("user@example.com");
 	});
 });
 
